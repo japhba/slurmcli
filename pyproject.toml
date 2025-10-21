@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slurmcli"
+version = "0.1.0"
+description = "Interactive SLURM + Dask launcher"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  {name = "J. Bauer"}
+]
+dependencies = [
+  "dask[distributed]",
+  "dask-jobqueue",
+  "jax",
+  "numpy",
+]
+
+[project.scripts]
+slurmcli = "slurmcli.launch_slurm:main_cli"

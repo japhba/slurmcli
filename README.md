@@ -21,25 +21,31 @@ Run `slurmcli` after installation to open the interactive launcher.
 
 ## Quickstart
 
+1. Install (editable)
 ```bash
-# 1. Install (editable)
 pip install -e git+https://github.com/japhba/slurmcli.git#egg=slurmcli
-
-# 2. Set any preferred defaults (optional)
+```
+2. Set any preferred defaults (optional)
+```
 export SLURMCLI_VENV_ACTIVATE=$HOME/myproject/.venv/bin/activate
+```
 
-# 3. Launch on a SLURM login node
+3. Launch on a SLURM login node, it will guide you through the initial setup
+```
 slurmcli
+```
 
-# 4. Connect from your notebook/script
+4. Connect from your notebook/script with the printed URL or Jupter kernel URL
+(example is also at ```slurmcli/run_slurm.py```
+```
 python - <<'PY'
 from dask.distributed import Client
 client = Client(open(".dask_scheduler_address").read().strip())
 print("Connected to", client.scheduler.address)
 PY
-
-# 5. Shut down with Ctrl+C when finished
 ```
+5. Shut down with Ctrl+C when finished, this will cancel your cluster jobs.
+
 
 ## Usage
 

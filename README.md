@@ -19,6 +19,28 @@ Command-line helpers for launching and monitoring Dask clusters on SLURM.
 
 Run `slurmcli` after installation to open the interactive launcher.
 
+## Quickstart
+
+```bash
+# 1. Install (editable)
+pip install -e git+https://github.com/japhba/slurmcli.git#egg=slurmcli
+
+# 2. Set any preferred defaults (optional)
+export SLURMCLI_VENV_ACTIVATE=$HOME/myproject/.venv/bin/activate
+
+# 3. Launch on a SLURM login node
+slurmcli
+
+# 4. Connect from your notebook/script
+python - <<'PY'
+from dask.distributed import Client
+client = Client(open(".dask_scheduler_address").read().strip())
+print("Connected to", client.scheduler.address)
+PY
+
+# 5. Shut down with Ctrl+C when finished
+```
+
 ## Usage
 
 ### 1. Prerequisites

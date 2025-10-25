@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 
 """
-Notes JB:
-- always use single process, core~=thread for GPU usage, otherwise OOM
+slurmcli (shell-commands edition)
+---------------------------------
 
-Jupyter: jupyter server   --no-browser   --ip=0.0.0.0   --ServerApp.runtime_dir=/tmp/jrt    --ServerApp.allow_remote_access=True --ServerApp.allow_origin="*" --port=11833
+Back to the previous approach: we use Slurm CLI tools (`sinfo`, `squeue`,
+`scontrol`) for cluster introspection. Dask launch is still handled via
+`dask_jobqueue.SLURMCluster`. Optional per-worker Jupyter servers are
+unchanged.
+
+Verbosity:
+  default   : concise
+  -v        : more detail (per-node lines when small buckets)
+  -vv       : show jobs & users on each node and include admin/hidden partitions (via `sinfo -a`)
+
 """
 
-import glob
+from __future__ import annotations
+
+import argparse
 import json
 import logging
 import os
 import re
 import select
-import shutil
 import signal
 import socket
 import subprocess
@@ -22,22 +32,22 @@ import time
 import uuid
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import numpy as np
-import jax, jax.numpy as jnp
-from dask import delayed
-from dask.distributed import Client, LocalCluster, progress
+# Third-party (kept for parity with original script)
+import numpy as np  # noqa: F401
+import jax, jax.numpy as jnp  # noqa: F401
+from dask import delayed  # noqa: F401
+from dask.distributed import Client, LocalCluster
 from dask_jobqueue import SLURMCluster
-from functools import partial, lru_cache
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
+# --- Optional color output ----------------------------------------------------
 try:
     from colorama import Fore, Style, init as _colorama_init
 
     _colorama_init()
     COLOR_ENABLED = True
-except ImportError:  # pragma: no cover - optional enhancement
+except Exception:  # optional
     COLOR_ENABLED = False
 
     class _DummyColors:
@@ -48,63 +58,24 @@ except ImportError:  # pragma: no cover - optional enhancement
 
 
 def colorize(text: str, *styles: str) -> str:
-    """Return colored text when colorama is available."""
     if COLOR_ENABLED and styles:
         return "".join(styles) + text + Style.RESET_ALL
     return text
 
 
-# --- Configuration management ---
-
+# --- Config ------------------------------------------------------------------
 CONFIG_FILE = Path.home() / ".slurmcli"
-
 logger = logging.getLogger("slurmcli")
 if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO)
 
 CONFIG_FIELDS: List[Dict[str, Any]] = [
-    {
-        "key": "mail",
-        "env": "SLURMCLI_MAIL",
-        "prompt": "Notification email address",
-        "type": str,
-        "default": "",
-    },
-    {
-        "key": "scheduler_host",
-        "env": "SLURMCLI_SCHEDULER_HOST",
-        "prompt": "Scheduler hostname/IP (for reconnecting)",
-        "type": str,
-        "default": "192.168.240.53",
-    },
-    {
-        "key": "scheduler_port",
-        "env": "SLURMCLI_SCHEDULER_PORT",
-        "prompt": "Dask scheduler port",
-        "type": int,
-        "default": 8786,
-    },
-    {
-        "key": "dashboard_port",
-        "env": "SLURMCLI_DASHBOARD_PORT",
-        "prompt": "Dask dashboard port",
-        "type": int,
-        "default": 8787,
-    },
-    {
-        "key": "jupyter_port",
-        "env": "SLURMCLI_JUPYTER_PORT",
-        "prompt": "Base Jupyter port",
-        "type": int,
-        "default": 11833,
-    },
-    {
-        "key": "venv_activate",
-        "env": "SLURMCLI_VENV_ACTIVATE",
-        "prompt": "Path to Python virtualenv to activate in workers",
-        "type": str,
-        "default": "/nfs/nhome/live/jbauer/recurrent_feature/.venv",
-    },
+    {"key": "mail", "env": "SLURMCLI_MAIL", "prompt": "Notification email address", "type": str, "default": ""},
+    {"key": "scheduler_host", "env": "SLURMCLI_SCHEDULER_HOST", "prompt": "Scheduler hostname/IP (for reconnecting)", "type": str, "default": "192.168.240.53"},
+    {"key": "scheduler_port", "env": "SLURMCLI_SCHEDULER_PORT", "prompt": "Dask scheduler port", "type": int, "default": 8786},
+    {"key": "dashboard_port", "env": "SLURMCLI_DASHBOARD_PORT", "prompt": "Dask dashboard port", "type": int, "default": 8787},
+    {"key": "jupyter_port", "env": "SLURMCLI_JUPYTER_PORT", "prompt": "Base Jupyter port", "type": int, "default": 11833},
+    {"key": "venv_activate", "env": "SLURMCLI_VENV_ACTIVATE", "prompt": "Path to Python virtualenv to activate in workers", "type": str, "default": "/nfs/nhome/live/jbauer/recurrent_feature/.venv"},
 ]
 
 
@@ -135,16 +106,12 @@ def _save_config_file(path: Path, data: Dict[str, Any]) -> None:
 
 
 def load_credentials() -> Dict[str, Any]:
-    """Load required credentials via env → file → interactive prompt."""
-
     config: Dict[str, Any] = {}
     file_cache = _load_config_file(CONFIG_FILE)
     missing: List[Dict[str, Any]] = []
 
     for field in CONFIG_FIELDS:
-        key = field["key"]
-        env_name = field["env"]
-        typ = field["type"]
+        key, env_name, typ = field["key"], field["env"], field["type"]
         env_val = os.getenv(env_name)
         if env_val is not None:
             try:
@@ -159,14 +126,12 @@ def load_credentials() -> Dict[str, Any]:
                 continue
             except ValueError:
                 pass
-
         missing.append(field)
 
     if missing:
         print("\n🗝️  slurmcli needs a few credentials to continue.")
         for field in missing:
-            key = field["key"]
-            typ = field["type"]
+            key, typ = field["key"], field["type"]
             default = file_cache.get(key, field.get("default"))
             prompt = field["prompt"]
             if default is not None:
@@ -184,318 +149,352 @@ def load_credentials() -> Dict[str, Any]:
                     print("   Invalid value, please try again.")
 
             file_cache[key] = config[key]
-
         _save_config_file(CONFIG_FILE, file_cache)
 
-    config_snapshot = {k: config.get(k) for k in sorted(config)}
-    logger.info(
-        "Loaded slurmcli configuration (env/file precedence applied): %s",
-        config_snapshot,
-    )
-
+    logger.info("Loaded slurmcli configuration: %s", {k: config.get(k) for k in sorted(config)})
     return config
 
 
 CONFIG = load_credentials()
-
 MAIL = CONFIG.get("mail")
 SCHEDULER_HOST = CONFIG.get("scheduler_host")
-IP_OLDSPORT = SCHEDULER_HOST  # Backwards compatibility alias
 PORT_SLURM_SCHEDULER = int(CONFIG.get("scheduler_port"))
 PORT_SLURM_DASHBOARD = int(CONFIG.get("dashboard_port"))
 JUPYTER_PORT = int(CONFIG.get("jupyter_port"))
 VENV_ACTIVATE = CONFIG.get("venv_activate")
-
 DEFAULT_JUPYTER_RUNTIME_BASE = "/tmp/jrt"
 
 
-def start_jupyter_server_on_worker(
-    port=JUPYTER_PORT,
-    runtime_dir_base=DEFAULT_JUPYTER_RUNTIME_BASE,
-    timeout=45.0,
-    jupyter_exe=None,
-    token=None,
-    allow_origin="*",
-):
-    """Launch a Jupyter server from within a Dask worker process.
+# --- Helper parsers for CLI output -------------------------------------------
 
-    Returns a serialisable dict containing connection details or error info.
-    """
-
-    # Imports duplicated locally so the function works when executed on workers.
-    import glob
-    import json
-    import os
-    import re
-    import select
-    import socket
-    import subprocess
-    import sys
-    import time
-    import uuid
-    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-
+def parse_cpu_string(cpu_str: str) -> Optional[Dict[str, int]]:
     try:
-        from dask.distributed import get_worker
-        worker = get_worker()
-        worker_meta = {"name": worker.name, "address": worker.address}
-    except Exception:
-        worker = None
-        worker_meta = {"name": None, "address": None}
-
-    token = token or uuid.uuid4().hex
-
-    # Build a per-worker runtime directory to avoid collisions across workers.
-    runtime_dir = os.path.join(runtime_dir_base, f"worker-{os.getpid()}")
-    os.makedirs(runtime_dir, exist_ok=True)
-
-    if jupyter_exe:
-        cmd = [jupyter_exe, "server"]
-    else:
-        cmd = [sys.executable, "-m", "jupyter", "server"]
-
-    env = os.environ.copy()
-    env.setdefault("JUPYTER_RUNTIME_DIR", runtime_dir)
-
-    # Respect explicit port if provided; otherwise allow Jupyter to choose.
-    if port is None:
-        port_arg = "--port=0"
-    else:
-        port_arg = f"--port={int(port)}"
-
-    cmd += [
-        "--no-browser",
-        "--ip=0.0.0.0",
-        port_arg,
-        "--ServerApp.port_retries=0",
-        f"--ServerApp.token={token}",
-        "--ServerApp.allow_remote_access=True",
-        f"--ServerApp.allow_origin={allow_origin}",
-        f"--ServerApp.runtime_dir={runtime_dir}",
-    ]
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        encoding="utf-8",
-        env=env,
-    )
-
-    url = None
-    parsed_url = None
-    captured = []
-    url_re = re.compile(r"(https?://[^\s,;]+)")
-    fd = proc.stdout.fileno() if proc.stdout is not None else None
-    t0 = time.time()
-
-    def _worker_host_ip() -> str:
-        try:
-            hostname = socket.gethostname()
-            return socket.gethostbyname(hostname)
-        except Exception:
-            return "127.0.0.1"
-
-    while True:
-        line = ""
-        if fd is not None:
-            rlist, _, _ = select.select([fd], [], [], 0.5)
-            if rlist:
-                line = proc.stdout.readline()
-        if line:
-            line = line.rstrip("\n")
-            captured.append(line)
-            match = url_re.search(line)
-            if match:
-                candidate = match.group(1)
-                parsed = urlparse(candidate)
-                qs = dict(parse_qsl(parsed.query, keep_blank_values=True))
-                qs["token"] = token  # enforce known token
-
-                host_ip = _worker_host_ip()
-                port_part = f":{parsed.port}" if parsed.port else ""
-
-                # Replace loopback hosts with worker IP for remote access
-                if parsed.hostname in {"127.0.0.1", "localhost"}:
-                    netloc = f"{host_ip}{port_part}"
-                else:
-                    netloc = parsed.netloc
-
-                new_query = urlencode(qs)
-                parsed = parsed._replace(netloc=netloc, query=new_query)
-                candidate = urlunparse(parsed)
-
-                url = candidate
-                parsed_url = parsed
-                break
-
-        if proc.poll() is not None:
-            if proc.stdout:
-                remainder = proc.stdout.read()
-                if remainder:
-                    captured.append(remainder)
-            break
-
-        if (time.time() - t0) > timeout:
-            break
-
-    if not url:
-        files = glob.glob(os.path.join(runtime_dir, "nbserver-*.json"))
-        files.sort(key=os.path.getmtime, reverse=True)
-        if files:
-            try:
-                with open(files[0], "r") as fh:
-                    data = json.load(fh)
-                candidate = data.get("url") or data.get("base_url")
-                if candidate:
-                    parsed = urlparse(candidate)
-                    host_ip = _worker_host_ip()
-                    if parsed.hostname in {"127.0.0.1", "localhost"}:
-                        port_part = f":{parsed.port}" if parsed.port else ""
-                        netloc = f"{host_ip}{port_part}"
-                    else:
-                        netloc = parsed.netloc
-                    qs = dict(parse_qsl(parsed.query, keep_blank_values=True))
-                    qs.setdefault("token", data.get("token", token))
-                    new_query = urlencode(qs)
-                    parsed = parsed._replace(netloc=netloc, query=new_query)
-                    url = urlunparse(parsed)
-                    parsed_url = parsed
-            except Exception as exc:
-                captured.append(f"[runtime-json-error] {exc}")
-
-    if url:
-        host_for_log = parsed_url.hostname if parsed_url else None
-        result = {
-            "status": "ok",
-            "pid": proc.pid,
-            "url": url,
-            "token": token,
-            "host": host_for_log,
-            "port": (parsed_url.port if parsed_url else None),
-            "worker": worker_meta,
-            "runtime_dir": runtime_dir,
-            "cmd": cmd,
-            "log_tail": captured[-20:],
-        }
-        return result
-
-    # If we reached here, shut down the process and report error
-    try:
-        if proc.poll() is None:
-            proc.kill()
+        parts = cpu_str.split('/')
+        if len(parts) == 4:
+            allocated, idle, other, total = map(int, parts)
+            return {"allocated": allocated, "idle": idle, "other": other, "total": total}
     except Exception:
         pass
-
-    return {
-        "status": "error",
-        "error": "no-url",
-        "pid": proc.pid,
-        "worker": worker_meta,
-        "log_tail": captured[-40:],
-    }
+    return None
 
 
-def stop_jupyter_server_on_worker(pid: int, sig: int = signal.SIGTERM, wait: float = 5.0):
-    """Attempt to terminate a previously launched Jupyter server on a worker."""
-
-    import os
-    import time
-
+def parse_memory_string(mem_str: str) -> Optional[float]:
+    mem_str = mem_str.strip().rstrip('+')
     try:
-        os.kill(int(pid), sig)
-    except ProcessLookupError:
-        return {"status": "not-found", "pid": pid}
-    except PermissionError as exc:
-        return {"status": "error", "pid": pid, "error": str(exc)}
+        u = mem_str.upper()
+        if 'T' in u:
+            return float(u.replace('T', '').replace('B', '')) * 1024
+        if 'G' in u:
+            return float(u.replace('G', '').replace('B', ''))
+        if 'M' in u:
+            return float(u.replace('M', '').replace('B', '')) / 1024
+        return float(mem_str) / 1024
+    except Exception:
+        return None
 
-    if wait and wait > 0:
-        deadline = time.time() + float(wait)
-        while time.time() < deadline:
-            try:
-                os.kill(int(pid), 0)
-            except ProcessLookupError:
-                return {"status": "terminated", "pid": pid}
-            time.sleep(0.2)
-        return {"status": "alive", "pid": pid}
 
-    return {"status": "signaled", "pid": pid}
+def expand_nodelist(nodelist: Optional[str]) -> List[str]:
+    if not nodelist or nodelist in {"(null)", "None"}:
+        return []
+    try:
+        result = subprocess.run([
+            "scontrol", "show", "hostnames", str(nodelist)
+        ], check=True, capture_output=True, text=True, timeout=5)
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return [nodelist]
 
-# --- Core Cluster Logic (from launchscript.py) ---
 
+def extract_gpu_total(gres_value: Optional[str]) -> int:
+    if not gres_value:
+        return 0
+    gres_value = gres_value.strip()
+    if not gres_value or gres_value in {"(null)", "N/A", "none"}:
+        return 0
+    total = 0
+    for entry in gres_value.split(','):
+        entry = entry.strip()
+        if "gpu" not in entry.lower():
+            continue
+        entry_core = entry.split('(', 1)[0]
+        parts = [part for part in entry_core.split(':') if part]
+        for part in reversed(parts):
+            m = re.search(r"(\d+)$", part)
+            if m:
+                total += int(m.group(1))
+                break
+    return total
+
+
+# --- Jobs & users per node ----------------------------------------------------
+
+def get_jobs_by_node() -> Dict[str, List[Dict[str, Any]]]:
+    """Return mapping node -> list of jobs {id,user} currently assigned there."""
+    try:
+        # %i jobid, %u user, %N nodelist
+        result = subprocess.run(
+            "squeue -h -o '%i|%u|%N'",
+            shell=True, check=True, capture_output=True, text=True, timeout=8
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return {}
+
+    by_node: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for line in result.stdout.strip().splitlines():
+        if '|' not in line:
+            continue
+        jid_s, user, nodelist = line.split('|', 3)[:3]
+        jid = None
+        try:
+            jid = int(jid_s)
+        except Exception:
+            pass
+        for node in expand_nodelist(nodelist.strip()):
+            by_node[node].append({"id": jid, "user": user})
+    return by_node
+
+
+def get_node_user_map() -> Dict[str, set]:
+    try:
+        result = subprocess.run(
+            "squeue -h -o '%u|%N'",
+            shell=True, check=True, capture_output=True, text=True, timeout=8,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return {}
+
+    node_users: Dict[str, set] = defaultdict(set)
+    expansion_cache: Dict[str, List[str]] = {}
+
+    for line in result.stdout.strip().splitlines():
+        if '|' not in line:
+            continue
+        user, nodelist = line.split('|', 1)
+        nodelist = nodelist.strip()
+        if not nodelist or nodelist in {"(null)", "None"}:
+            continue
+        if nodelist not in expansion_cache:
+            expansion_cache[nodelist] = expand_nodelist(nodelist)
+        for node in expansion_cache[nodelist]:
+            node_users[node].add(user.strip())
+
+    return node_users
+
+
+# --- Detailed node info via scontrol -----------------------------------------
+
+def query_users_for_node(node: str) -> List[str]:
+    try:
+        result = subprocess.run(
+            ["squeue", "-h", "-w", node, "-o", "%u"],
+            check=True, capture_output=True, text=True, timeout=6,
+        )
+        users = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        return sorted(users)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return []
+
+
+def get_detailed_node_info(nodes: Iterable[str], include_jobs: bool = False) -> Dict[str, Dict[str, Any]]:
+    node_users_map = get_node_user_map() if include_jobs else {}
+    jobs_by_node = get_jobs_by_node() if include_jobs else {}
+
+    node_info: Dict[str, Dict[str, Any]] = {}
+    for node in nodes:
+        try:
+            cmd = f"scontrol show node {node}"
+            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True, timeout=8)
+            output = result.stdout
+
+            info = {
+                'memory_gb': None,
+                'cpus_total': None,
+                'cpus_alloc': None,
+                'gpus': '0',
+                'gpus_total': 0,
+                'gpus_in_use': 0,
+                'state': 'unknown',
+                'users': [],
+                'user_count': 0,
+                'jobs': [],
+            }
+
+            for line in output.split('\n'):
+                if 'RealMemory=' in line:
+                    for part in line.split():
+                        if part.startswith('RealMemory='):
+                            try:
+                                mem_mb = int(part.split('=')[1])
+                                info['memory_gb'] = mem_mb / 1024
+                            except Exception:
+                                pass
+                if 'CPUTot=' in line:
+                    for part in line.split():
+                        if part.startswith('CPUTot='):
+                            try:
+                                info['cpus_total'] = int(part.split('=')[1])
+                            except Exception:
+                                pass
+                        if part.startswith('CPUAlloc='):
+                            try:
+                                info['cpus_alloc'] = int(part.split('=')[1])
+                            except Exception:
+                                pass
+                if 'Gres=' in line:
+                    for part in line.split():
+                        if part.startswith('Gres='):
+                            gres = part.split('=', 1)[1]
+                            info['gpus'] = gres
+                            info['gpus_total'] = extract_gpu_total(gres)
+                if 'GresUsed=' in line:
+                    for part in line.split():
+                        if part.startswith('GresUsed='):
+                            gres_used = part.split('=', 1)[1]
+                            info['gpus_in_use'] = extract_gpu_total(gres_used)
+                            break
+                if info['gpus_in_use'] == 0 and 'AllocTRES=' in line:
+                    for part in line.split():
+                        if part.startswith('AllocTRES='):
+                            tres = part.split('=', 1)[1]
+                            m = re.search(r'gres/gpu=(\d+)', tres)
+                            if m:
+                                info['gpus_in_use'] = int(m.group(1))
+                            break
+                if 'State=' in line:
+                    for part in line.split():
+                        if part.startswith('State='):
+                            info['state'] = part.split('=')[1].split('+')[0].lower()
+
+            # Users & jobs
+            if include_jobs:
+                users = sorted(node_users_map.get(node, set()))
+                if not users and (info.get('gpus_in_use', 0) or info.get('cpus_alloc', 0)):
+                    users = query_users_for_node(node)
+                info['users'] = users
+                info['user_count'] = len(users)
+                info['jobs'] = [j['id'] for j in jobs_by_node.get(node, []) if j.get('id')]
+
+            node_info[node] = info
+        except Exception:
+            continue
+
+    return node_info
+
+
+# --- Partition discovery via sinfo -------------------------------------------
+
+def get_partitions(show_all: bool = False) -> Optional[Dict[int, Dict[str, Any]]]:
+    """Parse `sinfo` for partitions and group nodes; optionally include admin/hidden with -a."""
+    print("🔎 Checking for available SLURM resources…")
+    try:
+        # %P partition, %t state, %C ALLOC/IDLE/OTHER/TOTAL, %G GRES, %N nodelist
+        base = "sinfo -h -o '%P|%t|%C|%G|%N'"
+        cmd = ("sinfo -a -h -o '%P|%t|%C|%G|%N'") if show_all else base
+        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        lines = result.stdout.strip().split('\n')
+
+        part_data = defaultdict(lambda: {"states": set(), "cpu_stats": [], "gres": set(), "nodes": set()})
+        expansion_cache: Dict[str, List[str]] = {}
+
+        for line in lines:
+            parts = line.split('|')
+            if len(parts) < 5:
+                continue
+            partition, state, cpus, gres, nodes = parts[:5]
+            partition = partition.strip('*')
+
+            # Default view: only include partitions that have idle or mixed nodes
+            # -vv (show_all=True): include every partition/state line
+            include = show_all or (("idle" in state.lower()) or ("mix" in state.lower()))
+            if not include:
+                continue
+
+            part_data[partition]['states'].add(state)
+            part_data[partition]['cpu_stats'].append(cpus)
+            part_data[partition]['gres'].add(gres)
+
+            for node_expr in nodes.split(','):
+                node_expr = node_expr.strip()
+                if not node_expr:
+                    continue
+                if node_expr not in expansion_cache:
+                    expansion_cache[node_expr] = expand_nodelist(node_expr)
+                for expanded in expansion_cache[node_expr]:
+                    part_data[partition]['nodes'].add(expanded)
+
+        if not part_data:
+            return None
+
+        # Build compact choices map
+        choices: Dict[int, Dict[str, Any]] = {}
+        for i, (partition, pdata) in enumerate(part_data.items(), start=1):
+            choices[i] = {
+                "partition": partition,
+                "states": sorted(pdata['states']),
+                "cpu_info": parse_cpu_string(pdata['cpu_stats'][0]) if pdata['cpu_stats'] else None,
+                "nodes": sorted(pdata['nodes']),
+            }
+        return choices
+
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"❌ Error: unable to run sinfo ({e})")
+        return None
+
+
+# --- Dask cluster launch ------------------------------------------------------
 WALLTIME = "01:00:00"
-MEMORY_GB_DEFAULT = 32  # Default memory in GB
-MEMORY = f"{MEMORY_GB_DEFAULT}GB"
-PROCESSES_PER_WORKER = 1  # NEW: Default number of Dask processes per SLURM job
+MEMORY_GB_DEFAULT = 32
+PROCESSES_PER_WORKER = 1
 CORES = 1
 NUM_JOBS = 4
 
-def get_cluster(
-    local=True,                  # if True, use local cluster instead of SLURM
-    num_jobs=NUM_JOBS,                  # number of SLURM jobs / Dask workers (logical)
-    processes=PROCESSES_PER_WORKER,     # Number of Dask worker processes per SLURM job
-    threads_per_worker=None,             # NEW: explicit threads per Dask worker process (int)
-    cores=CORES,                        # NOTE: legacy param; used when threads_per_worker not given
-    memory=MEMORY,
-    queue="cpu",
-    account="gcnu-ac",           # set to "" if not used
-    walltime=WALLTIME,
-    log_dir="dask_logs",
-    job_name="tfl",              # project name
-    venv_activate=VENV_ACTIVATE,  # leave empty if not needed
-    verbose=0,
-    nodelist=None,               # specific node to use
-    gres=None,                   # GPU resources (e.g., "gpu:2")
-):
-    """Initializes and returns a Dask cluster and client, either local or on SLURM.
 
-    Behavior notes regarding threads:
-      - threads_per_worker controls the number of threads each Dask worker process will use.
-      - For local clusters we set n_workers = num_jobs * processes and threads_per_worker as provided.
-      - For SLURMCluster we request cores-per-job = threads_per_worker * processes (so each process
-        gets threads_per_worker threads). If threads_per_worker is None, we fall back to `cores`.
-    """
-    # Determine threads_per_worker fallback logic
+def get_cluster(
+    *,
+    local: bool = True,
+    num_jobs: int = NUM_JOBS,
+    processes: int = PROCESSES_PER_WORKER,
+    threads_per_worker: Optional[int] = None,
+    cores: int = CORES,
+    memory: str = f"{MEMORY_GB_DEFAULT}GB",
+    queue: str = "cpu",
+    account: str = "gcnu-ac",
+    walltime: str = WALLTIME,
+    log_dir: str = "dask_logs",
+    job_name: str = "tfl",
+    venv_activate: Optional[str] = VENV_ACTIVATE,
+    nodelist: Optional[str] = None,
+    gres: Optional[str] = None,
+    verbose: int = 0,
+):
     if threads_per_worker is None:
-        # fall back to using cores as the threads per worker (legacy behavior)
         threads_per_worker = cores
 
-    # Ensure sensible integer
     threads_per_worker = int(max(1, threads_per_worker))
     processes = int(max(1, processes))
     num_jobs = int(max(1, num_jobs))
-
-    # For SLURMCluster we need to supply `cores` (total cores per job). Set it to threads_per_worker * processes.
     cores_for_job = threads_per_worker * processes
 
     if local:
-        # Use local cluster for parallelization on the current machine
-        print("🚀 Starting a local Dask cluster...")
-        # Create one local Dask worker process per (job * processes) for parity with SLURM layout,
-        # each with `threads_per_worker` threads.
+        print("🚀 Starting a local Dask cluster…")
         n_workers_local = num_jobs * processes
         cluster = LocalCluster(
             n_workers=n_workers_local,
             threads_per_worker=threads_per_worker,
             memory_limit=memory,
-            processes=True,  # use separate processes (matches processes-per-job model)
+            processes=True,
         )
         client = Client(cluster)
     else:
-        # Use SLURM cluster
-        print(f"🚀 Submitting {num_jobs} jobs to the '{queue}' SLURM partition...")
+        print(f"🚀 Submitting {num_jobs} jobs to the '{queue}' SLURM partition…")
         os.makedirs(log_dir, exist_ok=True)
-        prologue = []
+        prologue: List[str] = []
         if venv_activate:
             prologue.append(f"source {venv_activate}/bin/activate")
 
-        # Build job_extra for additional SLURM options
-        job_extra_directives = []
+        job_extra_directives: List[str] = []
         if nodelist:
             job_extra_directives.append(f"--nodelist={nodelist}")
-        
         if gres and 'gpu' in (gres or ""):
             try:
                 num_gpus = int(gres.split(':')[-1])
@@ -503,16 +502,15 @@ def get_cluster(
                     job_extra_directives.append(f"--gpus-per-task={num_gpus}")
                     job_extra_directives.append(f"--gpu-bind=single:{num_gpus}")
                     print(f"✅ Configuring workers with --gpus-per-task={num_gpus}")
-            except (ValueError, IndexError):
-                print(f"⚠️  Could not parse GPU count from '{gres}'. Passing it directly.")
+            except Exception:
                 if gres:
                     job_extra_directives.append(f"--gres={gres}")
-        
+
         cluster = SLURMCluster(
             queue=queue,
             account=account or "",
-            processes=processes, # number of worker processes per job
-            cores=cores_for_job, # total cores per job (threads_per_worker * processes)
+            processes=processes,
+            cores=cores_for_job,
             memory=memory,
             walltime=walltime,
             job_name=job_name,
@@ -521,47 +519,40 @@ def get_cluster(
             job_extra_directives=job_extra_directives,
             scheduler_options={
                 "port": PORT_SLURM_SCHEDULER,
-                "dashboard_address": f":{PORT_SLURM_DASHBOARD}"
+                "dashboard_address": f":{PORT_SLURM_DASHBOARD}",
             },
         )
-
-        # Scale to the number of SLURM jobs. Total workers (processes) will be num_jobs * processes
         cluster.scale(n=num_jobs)
         client = Client(cluster)
-        
+
     total_workers_expected = num_jobs * processes
     print("Cluster dashboard:", getattr(cluster, "dashboard_link", "n/a"))
     print("Scheduler address:", client.scheduler.address)
-
-    print(f"\n⏳ Waiting for {total_workers_expected} workers to connect...")
+    print(f"\n⏳ Waiting for {total_workers_expected} workers to connect…")
     client.wait_for_workers(n_workers=total_workers_expected, timeout=300)
 
-    # --- Scheduler-provided worker info ---
     sched_info = client.scheduler_info()
     workers = sched_info.get("workers", {})
     n_workers = len(workers)
-    print(f"\n✅ Workers connected: {n_workers}")
-
-    # Compute totals and a small summary from scheduler metadata
     total_cores = sum(w.get("nthreads", 0) for w in workers.values())
     total_mem_bytes = sum(w.get("memory_limit", 0) for w in workers.values())
     total_mem_gb = total_mem_bytes / (1024 ** 3) if total_mem_bytes else 0.0
-    print(f"   Summary: {n_workers} worker(s) — total cores={total_cores}, total mem≈{total_mem_gb:.2f}GB")
-    print()
-    
+    print(f"\n✅ Workers connected: {n_workers}")
+    print(f"   Summary: {n_workers} worker(s) — total cores={total_cores}, total mem≈{total_mem_gb:.2f}GB\n")
+
     if verbose > 0:
-        print_worker_details(client, workers)
-    
+        print_worker_details(workers, client)
+
     return cluster, client
 
-def print_worker_details(client, workers):
-    """Probes workers for runtime info and prints a detailed table."""
+
+def print_worker_details(workers: Dict[str, Any], client: Client) -> None:
     def _probe_worker():
         import os, platform
         info = {
             "hostname": platform.node(),
             "pid": os.getpid(),
-            "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES", "Not Set")
+            "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES", "Not Set"),
         }
         try:
             import jax
@@ -588,328 +579,149 @@ def print_worker_details(client, workers):
     print("-" * len(header) + "\n")
 
 
-# --- Interactive CLI Logic (from interactive_launcher.py) ---
+# --- Jupyter on workers -------------------------------------------------------
 
-# All helper functions (parse_cpu_string, etc.) are unchanged...
-def parse_cpu_string(cpu_str):
-    """Parse SLURM CPU string format: ALLOCATED/IDLE/OTHER/TOTAL"""
+def start_jupyter_server_on_worker(
+    port: Optional[int] = JUPYTER_PORT,
+    runtime_dir_base: str = DEFAULT_JUPYTER_RUNTIME_BASE,
+    timeout: float = 45.0,
+    jupyter_exe: Optional[str] = None,
+    token: Optional[str] = None,
+    allow_origin: str = "*",
+):
+    import glob
+    import json
+    import os
+    import re
+    import select
+    import socket
+    import subprocess
+    import sys
+    import time
+    import uuid
+    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
     try:
-        parts = cpu_str.split('/')
-        if len(parts) == 4:
-            allocated, idle, other, total = map(int, parts)
-            return {
-                'allocated': allocated,
-                'idle': idle,
-                'other': other,
-                'total': total
-            }
-    except:
-        pass
-    return None
+        from dask.distributed import get_worker
+        worker = get_worker()
+        worker_meta = {"name": worker.name, "address": worker.address}
+    except Exception:
+        worker = None
+        worker_meta = {"name": None, "address": None}
 
-def parse_memory_string(mem_str):
-    """Convert memory string to GB (handles MB, GB, etc.)"""
-    mem_str = mem_str.strip().rstrip('+')
-    try:
-        if 'T' in mem_str.upper():
-            return float(mem_str.upper().replace('T', '').replace('B', '')) * 1024
-        elif 'G' in mem_str.upper():
-            return float(mem_str.upper().replace('G', '').replace('B', ''))
-        elif 'M' in mem_str.upper():
-            return float(mem_str.upper().replace('M', '').replace('B', '')) / 1024
-        else:
-            # Assume MB if no unit
-            return float(mem_str) / 1024
-    except:
-        return None
+    token = token or uuid.uuid4().hex
+    runtime_dir = os.path.join(runtime_dir_base, f"worker-{os.getpid()}")
+    os.makedirs(runtime_dir, exist_ok=True)
 
-def expand_nodelist(nodelist):
-    """Expand a SLURM nodelist expression into individual hostnames."""
-    if not nodelist or nodelist in {"(null)", "None"}:
-        return []
-    try:
-        result = subprocess.run(
-            ["scontrol", "show", "hostnames", nodelist],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    except (subprocess.SubprocessError, FileNotFoundError):
-        # Fallback to the raw nodelist expression if expansion fails.
-        return [nodelist]
+    cmd = [jupyter_exe, "server"] if jupyter_exe else [sys.executable, "-m", "jupyter", "server"]
+    env = os.environ.copy(); env.setdefault("JUPYTER_RUNTIME_DIR", runtime_dir)
+    port_arg = "--port=0" if port is None else f"--port={int(port)}"
 
+    cmd += [
+        "--no-browser", "--ip=0.0.0.0", port_arg,
+        "--ServerApp.port_retries=0", f"--ServerApp.token={token}",
+        "--ServerApp.allow_remote_access=True", f"--ServerApp.allow_origin={allow_origin}",
+        f"--ServerApp.runtime_dir={runtime_dir}",
+    ]
 
-def get_node_user_map():
-    """Return mapping of node -> set of users currently running jobs on that node."""
-    try:
-        result = subprocess.run(
-            "squeue -h -o '%u|%N'",
-            shell=True,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return {}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, encoding="utf-8", env=env)
 
-    node_users = defaultdict(set)
-    expansion_cache: Dict[str, List[str]] = {}
+    url = None; parsed_url = None; captured: List[str] = []
+    url_re = re.compile(r"(https?://[^\s,;]+)")
+    fd = proc.stdout.fileno() if proc.stdout is not None else None
+    t0 = time.time()
 
-    for line in result.stdout.strip().splitlines():
-        if "|" not in line:
-            continue
-        user, nodelist = line.split("|", 1)
-        nodelist = nodelist.strip()
-        if not nodelist or nodelist in {"(null)", "None"}:
-            continue
-        if nodelist not in expansion_cache:
-            expansion_cache[nodelist] = expand_nodelist(nodelist)
-        for node in expansion_cache[nodelist]:
-            node_users[node].add(user.strip())
-
-    return node_users
-
-
-@lru_cache(maxsize=256)
-def query_users_for_node(node: str) -> List[str]:
-    """Fallback query for users on a specific node."""
-    try:
-        result = subprocess.run(
-            ["squeue", "-h", "-w", node, "-o", "%u"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        users = {line.strip() for line in result.stdout.splitlines() if line.strip()}
-        return sorted(users)
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return []
-
-
-def extract_gpu_total(gres_value):
-    """Extract total GPU count from SLURM GRES/GRESUsed fields."""
-    if not gres_value:
-        return 0
-    gres_value = gres_value.strip()
-    if not gres_value or gres_value in {"(null)", "N/A", "none"}:
-        return 0
-    total = 0
-    for entry in gres_value.split(","):
-        entry = entry.strip()
-        if "gpu" not in entry.lower():
-            continue
-        # Remove metadata such as (IDX:0-1)
-        entry_core = entry.split("(", 1)[0]
-        parts = [part for part in entry_core.split(":") if part]
-        for part in reversed(parts):
-            match = re.search(r"(\d+)$", part)
-            if match:
-                total += int(match.group(1))
-                break
-    return total
-
-
-def get_detailed_node_info(nodes, node_user_map=None):
-    """Get detailed information for a list of nodes."""
-    node_info = {}
-    
-    for node in nodes:
+    def _worker_host_ip() -> str:
         try:
-            cmd = f"scontrol show node {node}"
-            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True, timeout=5)
-            output = result.stdout
-            
-            info = {
-                'memory_gb': None,
-                'cpus_total': None,
-                'cpus_alloc': None,
-                'gpus': '0',
-                'gpus_total': 0,
-                'gpus_in_use': 0,
-                'state': 'unknown',
-                'users': [],
-                'user_count': 0,
-            }
-            
-            for line in output.split('\n'):
-                # Memory
-                if 'RealMemory=' in line:
-                    for part in line.split():
-                        if 'RealMemory=' in part:
-                            try:
-                                mem_mb = int(part.split('=')[1])
-                                info['memory_gb'] = mem_mb / 1024
-                            except:
-                                pass
-                
-                # CPUs
-                if 'CPUTot=' in line:
-                    for part in line.split():
-                        if 'CPUTot=' in part:
-                            try:
-                                info['cpus_total'] = int(part.split('=')[1])
-                            except:
-                                pass
-                        if 'CPUAlloc=' in part:
-                            try:
-                                info['cpus_alloc'] = int(part.split('=')[1])
-                            except:
-                                pass
-                
-                # GPUs
-                if 'Gres=' in line:
-                    for part in line.split():
-                        if part.startswith('Gres='):
-                            gres = part.split('=')[1]
-                            if 'gpu:' in gres:
-                                # Extract number of GPUs
-                                gpu_part = gres.split('gpu:')[1]
-                                # Handle formats like "gpu:4(S:0-1)" or "gpu:4"
-                                info['gpus'] = gpu_part.split('(')[0] if '(' in gpu_part else gpu_part
-                                info['gpus_total'] = extract_gpu_total(gres)
-                            else:
-                                info['gpus_total'] = extract_gpu_total(gres)
+            hostname = socket.gethostname()
+            return socket.gethostbyname(hostname)
+        except Exception:
+            return "127.0.0.1"
 
-                if 'GresUsed=' in line:
-                    for part in line.split():
-                        if part.startswith('GresUsed='):
-                            gres_used = part.split('=', 1)[1]
-                            info['gpus_in_use'] = extract_gpu_total(gres_used)
-                            break
+    while True:
+        line = ""
+        if fd is not None:
+            rlist, _, _ = select.select([fd], [], [], 0.5)
+            if rlist:
+                line = proc.stdout.readline()
+        if line:
+            line = line.rstrip("\n"); captured.append(line)
+            m = url_re.search(line)
+            if m:
+                candidate = m.group(1)
+                parsed = urlparse(candidate)
+                qs = dict(parse_qsl(parsed.query, keep_blank_values=True)); qs["token"] = token
+                host_ip = _worker_host_ip(); port_part = f":{parsed.port}" if parsed.port else ""
+                netloc = f"{host_ip}{port_part}" if parsed.hostname in {"127.0.0.1", "localhost"} else parsed.netloc
+                new_query = urlencode(qs)
+                parsed = parsed._replace(netloc=netloc, query=new_query)
+                url = urlunparse(parsed); parsed_url = parsed
+                break
+        if proc.poll() is not None:
+            if proc.stdout:
+                remainder = proc.stdout.read()
+                if remainder: captured.append(remainder)
+            break
+        if (time.time() - t0) > timeout:
+            break
 
-                if info['gpus_in_use'] == 0 and 'AllocTRES=' in line:
-                    for part in line.split():
-                        if part.startswith('AllocTRES='):
-                            tres = part.split('=', 1)[1]
-                            match = re.search(r'gres/gpu=(\d+)', tres)
-                            if match:
-                                info['gpus_in_use'] = int(match.group(1))
-                            break
-                
-                # State
-                if 'State=' in line:
-                    for part in line.split():
-                        if 'State=' in part:
-                            info['state'] = part.split('=')[1].split('+')[0].lower()
-
-            if info['gpus_total'] == 0 and info.get('gpus'):
-                info['gpus_total'] = extract_gpu_total(info['gpus'])
-
-            if node_user_map is not None:
-                users = sorted(node_user_map.get(node, set()))
-                info['users'] = users
-                info['user_count'] = len(users)
-                if info['user_count'] == 0 and (info.get('gpus_in_use', 0) or info.get('cpus_alloc', 0)):
-                    fallback_users = query_users_for_node(node)
-                    if fallback_users:
-                        info['users'] = fallback_users
-                        info['user_count'] = len(fallback_users)
-            
-            node_info[node] = info
-            
-        except Exception as e:
-            # If we can't get info for a node, skip it
-            continue
-    
-    return node_info
-
-def get_idle_partitions():
-    """Parses `sinfo` to find partitions with idle or mixed nodes."""
-    print("🔎 Checking for available SLURM resources...")
-    try:
-        # Get basic partition info
-        cmd = "sinfo -h -o '%P|%t|%C|%G|%N'"
-        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
-        lines = result.stdout.strip().split('\n')
-        
-        partition_data = defaultdict(lambda: {
-            'states': set(),
-            'cpu_stats': [],
-            'gres': set(),
-            'nodes': set()
-        })
-        
-        expansion_cache = {}
-
-        for line in lines:
+    if not url:
+        files = list(Path(runtime_dir).glob("nbserver-*.json"))
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
             try:
-                parts = line.split('|')
-                if len(parts) < 5:
-                    continue
-                    
-                partition, state, cpus, gres, nodes = parts[:5]
-                partition = partition.strip('*')
-                
-                # Only include partitions with available resources
-                if 'idle' in state or 'mixed' in state or 'mix' in state:
-                    partition_data[partition]['states'].add(state)
-                    partition_data[partition]['cpu_stats'].append(cpus)
-                    partition_data[partition]['gres'].add(gres)
-                    # Parse node list
-                    for node in nodes.split(','):
-                        node = node.strip()
-                        if not node:
-                            continue
-                        if node not in expansion_cache:
-                            expansion_cache[node] = expand_nodelist(node)
-                        expanded_nodes = expansion_cache.get(node, [node])
-                        for expanded in expanded_nodes:
-                            partition_data[partition]['nodes'].add(expanded)
-                        
-            except (ValueError, IndexError):
-                continue
+                data = json.loads(files[0].read_text("utf-8"))
+                candidate = data.get("url") or data.get("base_url")
+                if candidate:
+                    from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+                    parsed = urlparse(candidate)
+                    host_ip = _worker_host_ip()
+                    port_part = f":{parsed.port}" if parsed.port else ""
+                    netloc = f"{host_ip}{port_part}" if parsed.hostname in {"127.0.0.1", "localhost"} else parsed.netloc
+                    qs = dict(parse_qsl(parsed.query, keep_blank_values=True)); qs.setdefault("token", data.get("token", token))
+                    parsed = parsed._replace(netloc=netloc, query=urlencode(qs))
+                    url = urlunparse(parsed); parsed_url = parsed
+            except Exception as exc:
+                captured.append(f"[runtime-json-error] {exc}")
 
-        if not partition_data:
-            return None
-        
-        # Pre-compute current node usage so we can annotate interactive prompts.
-        node_user_map = get_node_user_map()
+    if url:
+        return {
+            "status": "ok", "pid": proc.pid, "url": url, "token": token,
+            "host": (parsed_url.hostname if parsed_url else None), "port": (parsed_url.port if parsed_url else None),
+            "worker": worker_meta, "runtime_dir": runtime_dir, "cmd": cmd, "log_tail": captured[-20:],
+        }
 
-        # Now get detailed info for each partition's nodes
-        choices = {}
-        for i, (partition, data) in enumerate(partition_data.items()):
-            nodes_list = sorted(data['nodes'])
-            
-            # Get detailed node information
-            node_details = get_detailed_node_info(nodes_list, node_user_map)
-            
-            # Aggregate CPU stats
-            cpu_info = None
-            if data['cpu_stats']:
-                cpu_info = parse_cpu_string(data['cpu_stats'][0])
-            
-            # Group nodes by configuration
-            node_configs = defaultdict(list)
-            for node, info in node_details.items():
-                config_key = (info['memory_gb'], info['cpus_total'], info['gpus'])
-                node_configs[config_key].append((node, info))
-            
-            choices[i + 1] = {
-                "partition": partition,
-                "states": sorted(data['states']),
-                "cpu_info": cpu_info,
-                "node_configs": dict(node_configs),
-                "all_nodes": node_details
-            }
-        
-        return choices
+    try:
+        if proc.poll() is None:
+            proc.kill()
+    except Exception:
+        pass
+    return {"status": "error", "error": "no-url", "pid": proc.pid, "worker": worker_meta, "log_tail": captured[-40:]}
 
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"❌ Error: `sinfo` command failed. Are you on a SLURM login node? ({e})")
-        return None
 
-def format_gpu_count(gpu_str):
-    """Format GPU string for display."""
-    if not gpu_str or gpu_str == '0' or gpu_str == '(null)' or 'null' in gpu_str.lower():
-        return "0"
-    return gpu_str
+def stop_jupyter_server_on_worker(pid: int, sig: int = signal.SIGTERM, wait: float = 5.0):
+    try:
+        os.kill(int(pid), sig)
+    except ProcessLookupError:
+        return {"status": "not-found", "pid": pid}
+    except PermissionError as exc:
+        return {"status": "error", "pid": pid, "error": str(exc)}
 
-def prompt_for_value(prompt_text, default, type_converter=str):
-    """Generic function to prompt user for a value with a default."""
+    if wait and wait > 0:
+        deadline = time.time() + float(wait)
+        while time.time() < deadline:
+            try:
+                os.kill(int(pid), 0)
+            except ProcessLookupError:
+                return {"status": "terminated", "pid": pid}
+            time.sleep(0.2)
+        return {"status": "alive", "pid": pid}
+    return {"status": "signaled", "pid": pid}
+
+
+# --- Interactive UI -----------------------------------------------------------
+
+def prompt_for_value(prompt_text: str, default: Any, type_converter=str):
     while True:
         value = input(f"➡️  {prompt_text} (default: {default}): ") or str(default)
         try:
@@ -918,117 +730,106 @@ def prompt_for_value(prompt_text, default, type_converter=str):
             print(f"❌ Invalid input. Please enter a value of type {type_converter.__name__}.")
 
 
-def main_interactive():
-    """Main interactive loop to configure and launch the SLURM cluster."""
-    idle_partitions = get_idle_partitions()
+def main_interactive(verbosity: int) -> None:
+    show_admin = verbosity >= 2
+    include_jobs = verbosity >= 2
 
-    if not idle_partitions:
-        print("\n😔 No idle or mixed nodes found. Please try again later.")
+    parts = get_partitions(show_all=show_admin)
+    if not parts:
+        print("\n😔 No suitable partitions found. Try again later or check permissions.")
         return
 
-    print("\n✅ Found available partitions:\n")
-    print("="*90)
-    
-    for key, val in idle_partitions.items():
-        partition = val['partition']
-        cpu_info = val['cpu_info']
-        node_configs = val['node_configs']
-        
-        partition_heading = colorize(f"[{key}] Partition: {partition}", Style.BRIGHT, Fore.CYAN)
-        print(partition_heading)
-        
+    print("\n✅ Partitions:\n")
+    print("=" * 90)
+
+    # Collect detailed node info once
+    all_nodes = sorted({n for p in parts.values() for n in p["nodes"]})
+    node_details_all = get_detailed_node_info(all_nodes, include_jobs=include_jobs)
+
+    part_index: Dict[int, str] = {}
+    for idx, pdata in sorted(parts.items()):
+        pname = pdata['partition']
+        nodes = pdata['nodes']
+        cpu_info = pdata['cpu_info']
+        header = colorize(f"[{idx}] Partition: {pname}", Style.BRIGHT, Fore.CYAN)
+        print(header)
         if cpu_info:
-            avail = cpu_info['idle']
-            total = cpu_info['total']
-            alloc = cpu_info['allocated']
-            cpu_line = f"    CPUs: {avail}/{total} available ({alloc} in use)"
-            print(colorize(cpu_line, Style.BRIGHT, Fore.WHITE) if COLOR_ENABLED else cpu_line)
-        
-        print(f"    Nodes by configuration:")
-        for config, node_list in sorted(node_configs.items(), key=lambda x: (x[0][0] or 0, x[0][1] or 0), reverse=True):
-            mem_gb, cpus, gpus = config
-            count = len(node_list)
-            mem_str = f"{mem_gb:.0f}GB" if mem_gb else "N/A"
-            cpu_str = f"{cpus}" if cpus else "N/A"
-            gpu_str = format_gpu_count(gpus)
-            
-            available_count = sum(1 for _, info in node_list if info['state'] in ['idle', 'mixed', 'mix'])
-            gpu_in_use = sum(info.get('gpus_in_use', 0) or 0 for _, info in node_list)
-            gpu_total = sum(info.get('gpus_total', 0) or 0 for _, info in node_list)
-            users_per_node = [info.get('user_count', 0) for _, info in node_list]
+            avail, total, alloc = cpu_info['idle'], cpu_info['total'], cpu_info['allocated']
+            line = f"    CPUs: {avail}/{total} available ({alloc} in use)"
+            print(colorize(line, Style.BRIGHT, Fore.WHITE) if COLOR_ENABLED else line)
+
+        # Summarize by config (RAM/CPU/GPU)
+        configs: Dict[Tuple[int, int, int], List[str]] = defaultdict(list)
+        for n in nodes:
+            nd = node_details_all.get(n)
+            if nd is None:
+                continue
+            mem_gb = int((nd['memory_gb'] or 0))
+            cpus = int(nd['cpus_total'] or 0)
+            gpus = int(nd['gpus_total'] or 0)
+            configs[(mem_gb, cpus, gpus)].append(n)
+
+        for (mem_gb, cpus, gpus), bucket_nodes in sorted(configs.items(), key=lambda x: (x[0][0], x[0][1]), reverse=True):
+            infos = [node_details_all[n] for n in bucket_nodes]
+            available_count = sum(1 for i in infos if i['state'] in {'idle', 'mixed', 'mix'})
+            gpu_in_use = sum(i['gpus_in_use'] for i in infos)
+            gpu_total = sum(i['gpus_total'] for i in infos)
+            users_per_node = [len(i.get('users', [])) for i in infos]
             min_users = min(users_per_node) if users_per_node else 0
             max_users = max(users_per_node) if users_per_node else 0
-
             bullet = colorize("•", Fore.YELLOW, Style.BRIGHT) if COLOR_ENABLED else "•"
-            summary = f"      {bullet} {count} nodes: {mem_str} RAM, {cpu_str} CPUs, {gpu_str} GPUs ({available_count} available"
-            if gpu_total or gpu_in_use:
-                summary += f"; GPUs in use: {gpu_in_use}/{gpu_total}"
-            if max_users:
-                if min_users == max_users:
-                    summary += f"; users/node: {max_users}"
-                else:
-                    summary += f"; users/node: {min_users}-{max_users}"
-            elif users_per_node:
-                summary += "; users/node: 0"
+            summary = (
+                f"      {bullet} {len(bucket_nodes)} nodes: {mem_gb}GB RAM, {cpus} CPUs, {gpus} GPUs "
+                f"({available_count} available; GPUs in use: {gpu_in_use}/{gpu_total}"
+            )
+            if users_per_node:
+                summary += f"; users/node: {min_users}-{max_users}"
             summary += ")"
-            
             print(summary)
-            
-            if count <= 10:
-                for node, info in sorted(node_list):
-                    state_good = info['state'] in ['idle', 'mixed', 'mix']
+
+            if verbosity >= 1 and len(bucket_nodes) <= 10:
+                for node in sorted(bucket_nodes):
+                    i = node_details_all[node]
+                    state_good = i['state'] in {'idle', 'mixed', 'mix'}
                     state_icon = colorize("✓", Fore.GREEN) if state_good else colorize("✗", Fore.RED)
-                    state_text = colorize(info['state'], Fore.GREEN) if state_good else colorize(info['state'], Fore.RED)
                     if not COLOR_ENABLED:
                         state_icon = "✓" if state_good else "✗"
-                        state_text = info['state']
-                    cpus_used = f"{info['cpus_alloc']}/{info['cpus_total']}" if info['cpus_alloc'] is not None else "N/A"
-                    gpus_total_value = info.get('gpus_total')
-                    gpus_total_str = "N/A" if gpus_total_value is None else str(gpus_total_value)
-                    gpu_usage = f"{info.get('gpus_in_use', 0)}/{gpus_total_str}"
-                    gpu_descriptor = info.get('gpus')
-                    if gpu_descriptor and gpu_descriptor not in {"0", "N/A"} and ':' in gpu_descriptor:
-                        type_label = ":".join(gpu_descriptor.split(':')[:-1]) or ""
-                        if type_label:
-                            gpu_usage = f"{gpu_usage} ({type_label})"
-                    user_count = info.get('user_count', 0)
-                    node_line = f"        {state_icon} {node:<20} ({state_text}, CPUs: {cpus_used}, GPUs: {gpu_usage}, Users: {user_count})"
-                    print(node_line)
-        
-        print("-"*90)
+                    mem_str = f"{int(i['memory_gb'] or 0)}GB" if i['memory_gb'] else "N/A"
+                    cpu_str = f"{i['cpus_alloc'] or 0}/{i['cpus_total'] or 'N/A'}"
+                    gpu_usage = f"{i['gpus_in_use']}/{i['gpus_total']}"
+                    extra = ""
+                    if verbosity >= 2 and (i.get('jobs') or i.get('users')):
+                        jobs_s = ",".join(str(j) for j in i.get('jobs', [])) or "-"
+                        users_s = ",".join(i.get('users', [])) or "-"
+                        extra = f" jobs:{jobs_s} users:{users_s}"
+                    print(f"        {state_icon} {node:<20} ({i['state']:<6}, RAM: {mem_str}, CPUs: {cpu_str}, GPUs: {gpu_usage}){extra}")
 
-    # 1. Select Partition
+        print("-" * 90)
+        part_index[idx] = pname
+
+    # 1) Select partition
     while True:
         try:
             choice = int(input("\n➡️  Enter the number of your choice: "))
-            if choice in idle_partitions:
-                selected_partition = idle_partitions[choice]['partition']
-                available_nodes = idle_partitions[choice]['all_nodes']
+            if choice in part_index:
+                selected_partition = part_index[choice]
                 break
             else:
-                print(f"❌ Invalid choice. Please select a number from 1 to {len(idle_partitions)}.")
+                print(f"❌ Invalid choice. Please select a number from 1 to {len(part_index)}.")
         except ValueError:
             print("❌ Please enter a valid number.")
 
     print(f"\n✅ You selected partition: '{selected_partition}'")
 
-    launch_kernels_choice = input(
-        "\n🧪 Would you like to start a Jupyter server on each worker after launch? (y/n): "
-    ).strip().lower()
+    launch_kernels_choice = input("\n🧪 Start a Jupyter server on each worker after launch? (y/n): ").strip().lower()
     launch_kernels = launch_kernels_choice == 'y'
-
     if launch_kernels:
         print(
-            "\nℹ️  Defaults updated for interactive Jupyter use:"
-            "\n   • SLURM jobs: 1"
-            "\n   • CPU cores per process: 16"
-            "\n   • No additional limits on threads or processes\n"
+            "\nℹ️  Defaults updated for interactive Jupyter use:\n"
+            "   • SLURM jobs: 1\n   • CPU cores per process: 16\n   • No additional thread limits\n"
         )
 
-    print("Now, let's configure the cluster.\n")
-
-    # 2. Gather Parameters --- MODIFIED SECTION
-
+    # 2) Parameters
     walltime = prompt_for_value("Enter walltime [HH:MM:SS]", WALLTIME)
     default_num_jobs = 1 if launch_kernels else NUM_JOBS
     default_processes = PROCESSES_PER_WORKER
@@ -1037,104 +838,82 @@ def main_interactive():
     num_jobs = prompt_for_value("Enter number of SLURM jobs", default_num_jobs, int)
     processes = prompt_for_value("Enter processes per job", default_processes, int)
     cores_per_process = prompt_for_value("Enter CPU cores per process", default_cores_per_process, int)
-    
-    # NEW: interactive limit for threads per worker
+
     print(
-        "\n🧵 Threads limit: You can optionally limit the number of threads each Dask worker process uses.\n"
-        "If you enter 0 (or leave empty), no additional limit is applied and the value of 'cores per process' is used.\n"
-        "Otherwise the threads-per-worker will be set to the smaller of the value you enter and 'cores per process'."
+        "\n🧵 Threads limit: Optionally limit threads per Dask worker.\n"
+        "Enter 0 for no limit (uses 'cores per process')."
     )
-    default_threads_limit = 0
-    threads_limit = prompt_for_value("Limit threads per worker (0 for no limit)", default_threads_limit, int)
-    
+    threads_limit = prompt_for_value("Limit threads per worker (0 for no limit)", 0, int)
     memory_gb = prompt_for_value("Enter memory per job in GB (e.g., 32)", MEMORY_GB_DEFAULT, int)
     memory = f"{memory_gb}GB"
 
-    # Compute threads_per_worker that will actually be used
-    if threads_limit and threads_limit > 0:
-        threads_per_worker = min(cores_per_process, threads_limit)
-    else:
-        threads_per_worker = cores_per_process
-
-    # Calculate total cores for the job, as required by dask-jobqueue
+    threads_per_worker = min(cores_per_process, threads_limit) if threads_limit and threads_limit > 0 else cores_per_process
     total_cores_for_job = threads_per_worker * processes
 
-    # 3. Node and GPU specification
+    # 3) Node selection within chosen partition
+    nodes_in_part = parts[[k for k, v in parts.items() if v['partition'] == selected_partition][0]]['nodes']
+    nodes_info_part = [node_details_all[n] for n in nodes_in_part if n in node_details_all]
+
     print(f"\n📍 Detailed node list for partition '{selected_partition}':")
-    print("="*120)
+    print("=" * 120)
     print(f"{'Idx':<5} {'Node':<22} {'State':<10} {'Memory':<12} {'CPUs (used/total)':<20} {'GPUs (used/total)':<22} {'Users':<7}")
-    print("-"*120)
-    
-    available_for_selection = []
-    sorted_nodes = sorted(available_nodes.items())
-    for idx, (node, info) in enumerate(sorted_nodes, start=1):
-        state = info['state']
-        mem_str = f"{info['memory_gb']:.0f}GB" if info['memory_gb'] else "N/A"
-        cpu_str = f"{info['cpus_alloc'] or 0}/{info['cpus_total'] or 'N/A'}"
-        gpus_total_value = info.get('gpus_total')
-        gpus_total_str = "N/A" if gpus_total_value is None else str(gpus_total_value)
-        gpu_usage = f"{info.get('gpus_in_use', 0)}/{gpus_total_str}"
-        gpu_descriptor = info.get('gpus')
-        if gpu_descriptor and gpu_descriptor not in {"0", "N/A"} and ':' in gpu_descriptor:
-            type_label = ":".join(gpu_descriptor.split(':')[:-1]) or ""
-            if type_label:
-                gpu_usage = f"{gpu_usage} ({type_label})"
-        is_available = state in ['idle', 'mixed', 'mix']
+    print("-" * 120)
+
+    available_for_selection: List[Tuple[int, str]] = []
+    for idx, i in enumerate(sorted(nodes_info_part, key=lambda x: x['state']+str(x.get('cpus_total') or 0)), start=1):
+        mem_str = f"{int(i['memory_gb'] or 0):.0f}GB" if i['memory_gb'] is not None else "N/A"
+        cpu_str = f"{i['cpus_alloc'] or 0}/{i['cpus_total'] or 'N/A'}"
+        gpu_str = f"{i['gpus_in_use']}/{i['gpus_total']}"
+        is_available = i['state'] in {'idle', 'mixed', 'mix'}
         marker = "✅" if is_available else " "
-        user_count = info.get('user_count', 0)
-        print(f"{idx:<5} {marker} {node:<20} {state:<10} {mem_str:<12} {cpu_str:<20} {gpu_usage:<22} {user_count:<7}")
+        user_count = len(i.get('users', []))
+        print(f"{idx:<5} {marker} {nodes_in_part[idx-1]:<20} {i['state']:<10} {mem_str:<12} {cpu_str:<20} {gpu_str:<22} {user_count:<7}")
         if is_available:
-            available_for_selection.append((idx, node))
-    
-    print("="*120)
-    print(f"✓ = Available for job submission ({len(available_for_selection)} nodes)")
-    print()
-    
-    # NEW: choose node by enumerated index (or leave empty for any)
-    while True:
-        nodelist_choice = input("Enter index of specific node to use (leave empty for any): ").strip()
-        if nodelist_choice == "":
-            nodelist = None
-            break
+            available_for_selection.append((idx, nodes_in_part[idx-1]))
+
+    print("=" * 120)
+    print(f"✓ = Available for job submission ({len(available_for_selection)} nodes)\n")
+
+    nodelist_choice = input("Enter index of specific node to use (leave empty for any): ").strip()
+    nodelist = None
+    if nodelist_choice:
         try:
             nidx = int(nodelist_choice)
-            # Validate index exists in sorted_nodes
-            if 1 <= nidx <= len(sorted_nodes):
-                nodelist = sorted_nodes[nidx - 1][0]
-                break
+            if 1 <= nidx <= len(nodes_in_part):
+                nodelist = nodes_in_part[nidx - 1]
             else:
-                print(f"❌ Invalid index. Choose between 1 and {len(sorted_nodes)}.")
+                print("⚠️  Invalid index; proceeding without a specific node.")
         except ValueError:
-            print("❌ Please enter a valid integer index or leave empty.")
+            print("⚠️  Invalid input; proceeding without a specific node.")
 
     num_gpus = prompt_for_value("Enter number of GPUs per process (0 for CPU-only)", 0, int)
     gres = f"gpu:{num_gpus}" if num_gpus > 0 else None
 
-    # 4. Confirmation --- MODIFIED SECTION
-    print("\n" + "="*50)
+    # 4) Summary
+    print("\n" + "=" * 50)
     print("📋 LAUNCH SUMMARY")
-    print("="*50)
+    print("=" * 50)
     print(f"  Partition / Queue: {selected_partition}")
     print(f"  Walltime:          {walltime}")
     print(f"  SLURM Jobs:        {num_jobs}")
     print(f"  Processes per job: {processes}")
     print(f"  Cores per process: {cores_per_process}")
     print(f"  Threads per process (actual): {threads_per_worker}")
-    print(f"  Total cores per job: {total_cores_for_job}  (threads_per_worker * processes)")
+    print(f"  Total cores per job: {total_cores_for_job}")
     print(f"  Memory per job:    {memory}")
     print(f"  Total workers:     {num_jobs * processes}")
     print(f"  Specific node:     {nodelist or 'Any available'}")
     print(f"  GPUs per process:  {num_gpus}")
     print(f"  Launch kernels:    {'Yes' if launch_kernels else 'No'}")
-    print("="*50)
+    print("=" * 50)
 
     if input("Proceed with launch? (y/n): ").lower() != 'y':
         print("🚫 Launch aborted.")
         return
 
-    # 5. Launch Cluster --- MODIFIED SECTION
-    cluster, client = None, None
-    started_jupyter_servers = []
+    # 5) Launch Cluster
+    cluster = client = None
+    started_jupyter_servers: List[Dict[str, Any]] = []
     try:
         cluster, client = get_cluster(
             local=False,
@@ -1142,29 +921,23 @@ def main_interactive():
             num_jobs=num_jobs,
             processes=processes,
             threads_per_worker=threads_per_worker,
-            cores=cores_per_process,  # legacy param, but get_cluster will use threads_per_worker to decide effective cores
+            cores=cores_per_process,
             memory=memory,
             walltime=walltime,
             nodelist=nodelist,
             gres=gres,
-            verbose=1
+            verbose=verbosity,
         )
-
         print("\n✅ Dask cluster is running!")
-        print("   You can connect to this session from another terminal or notebook.")
         print(f"   Reconnect with: Client('{client.scheduler.address}')")
-        print("   Press Ctrl+C to shut down the cluster.")
-        
         try:
-            with open('.dask_scheduler_address', 'w') as f:
-                f.write(client.scheduler.address)
-            print(f"   Scheduler address saved to .dask_scheduler_address")
-        except:
+            Path(".dask_scheduler_address").write_text(client.scheduler.address)
+            print("   Scheduler address saved to .dask_scheduler_address")
+        except Exception:
             pass
 
-        # If requested, attempt to launch kernels on each worker via Dask
         if launch_kernels:
-            print("\n🔌 Attempting to start an IPython/Jupyter kernel on each worker via Dask...")
+            print("\n🔌 Starting a Jupyter server on each worker via Dask…")
             worker_infos = client.scheduler_info().get("workers", {})
             worker_addresses = list(worker_infos.keys())
             if not worker_addresses:
@@ -1172,16 +945,8 @@ def main_interactive():
             else:
                 session_tag = uuid.uuid4().hex[:8]
                 for idx, worker_addr in enumerate(worker_addresses):
-                    worker_port = JUPYTER_PORT
-                    if worker_port is not None:
-                        worker_port = JUPYTER_PORT + idx
-                        if worker_port > 65535:
-                            worker_port = None
-                    runtime_base = os.path.join(
-                        DEFAULT_JUPYTER_RUNTIME_BASE,
-                        f"session-{session_tag}",
-                        f"worker-{idx}"
-                    )
+                    worker_port = JUPYTER_PORT + idx if JUPYTER_PORT is not None else None
+                    runtime_base = os.path.join(DEFAULT_JUPYTER_RUNTIME_BASE, f"session-{session_tag}", f"worker-{idx}")
                     future = client.submit(
                         start_jupyter_server_on_worker,
                         port=worker_port,
@@ -1194,72 +959,77 @@ def main_interactive():
                     try:
                         info = future.result(timeout=180)
                     except Exception as exc:
-                        print(f"❌ Worker {worker_addr}: exception while starting Jupyter server -> {exc}")
+                        print(f"❌ Worker {worker_addr}: exception while starting Jupyter -> {exc}")
                         continue
 
                     if info.get("status") == "ok" and info.get("url"):
                         host_display = info.get("host") or worker_addr
                         print(f"✅ Worker {worker_addr} ({host_display})")
                         print(f"   PID: {info.get('pid')} | URL: {info.get('url')}")
-                        started_jupyter_servers.append({
-                            "worker": worker_addr,
-                            "pid": info.get("pid"),
-                        })
+                        started_jupyter_servers.append({"worker": worker_addr, "pid": info.get("pid")})
                     else:
-                        print(f"❌ Worker {worker_addr}: {info.get('error', 'failed to start Jupyter server')}")
+                        print(f"❌ Worker {worker_addr}: {info.get('error', 'failed to start Jupyter')}")
                         log_tail = info.get("log_tail") or []
                         if log_tail:
                             print("   Log tail:")
                             for line in log_tail[-10:]:
                                 print(f"   {line}")
 
-        # Keep running until interrupted: maintain previous behavior
         while True:
             time.sleep(3600)
 
     except KeyboardInterrupt:
-        print("\n\n⚠️  Interrupt received. Shutting down...")
+        print("\n\n⚠️  Interrupt received. Shutting down…")
     except Exception as e:
-        print(f"\n💥 An error occurred during cluster setup: {e}")
+        print(f"\n💥 Error during cluster setup: {e}")
     finally:
-        print("\n🛑 Shutting down cluster and client...")
+        print("\n🛑 Shutting down cluster and client…")
         if client and started_jupyter_servers:
-            print("🧹 Stopping remote Jupyter servers...")
+            print("🧹 Stopping remote Jupyter servers…")
             for entry in started_jupyter_servers:
-                worker = entry.get("worker")
-                pid = entry.get("pid")
+                worker, pid = entry.get("worker"), entry.get("pid")
                 try:
-                    submit_kwargs = {"pure": False}
-                    if worker:
-                        submit_kwargs.update({"workers": [worker], "allow_other_workers": False})
-                    fut = client.submit(
-                        stop_jupyter_server_on_worker,
-                        pid,
-                        **submit_kwargs,
-                    )
+                    fut = client.submit(stop_jupyter_server_on_worker, pid, pure=False, workers=[worker], allow_other_workers=False)
                     res = fut.result(timeout=15)
                     status = res.get("status")
                 except Exception as exc:
                     status = f"error: {exc}"
                 print(f"   Worker {worker or 'unknown'} pid {pid}: {status}")
-        if client: 
+        if client:
             try:
                 client.close()
-            except:
+            except Exception:
                 pass
-        if cluster: 
+        if cluster:
             try:
                 cluster.close()
-            except:
+            except Exception:
                 pass
         print("✅ Cleanup complete.")
 
-# --- Main Entry Point ---
+
+# --- CLI ---------------------------------------------------------------------
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Interactive Dask-on-Slurm launcher (CLI-based Slurm introspection)")
+    p.add_argument("--local", action="store_true", help="Launch a local Dask cluster instead of Slurm")
+    p.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (-v, -vv)")
+    return p.parse_args(argv)
 
 
 def main_cli() -> None:
-    """Console script entry point for the interactive launcher."""
-    main_interactive()
+    args = parse_args()
+    if args.local:
+        get_cluster(local=True, verbose=args.verbose)
+        print("\n(local cluster running; press Ctrl+C to stop)")
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            print("\nStopping…")
+        return
+
+    main_interactive(args.verbose)
 
 
 if __name__ == "__main__":

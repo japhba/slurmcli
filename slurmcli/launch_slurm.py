@@ -63,6 +63,15 @@ def colorize(text: str, *styles: str) -> str:
     return text
 
 
+def emphasize(text: str, color: Optional[str] = None) -> str:
+    if COLOR_ENABLED:
+        styles: List[str] = [Style.BRIGHT]
+        if color:
+            styles.append(color)
+        return colorize(text, *styles)
+    return f"**{text}**"
+
+
 # --- Config ------------------------------------------------------------------
 CONFIG_FILE = Path.home() / ".slurmcli"
 logger = logging.getLogger("slurmcli")
@@ -226,6 +235,94 @@ def extract_gpu_total(gres_value: Optional[str]) -> int:
     return total
 
 
+def extract_gpu_labels(gres_value: Optional[str]) -> List[str]:
+    labels: List[str] = []
+    if not gres_value:
+        return labels
+
+    seen: set[str] = set()
+    for raw_entry in gres_value.split(','):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        if "gpu" not in entry.lower():
+            continue
+        entry_core = entry.split('(', 1)[0]
+        parts = [part for part in entry_core.split(':') if part]
+        if parts and parts[0].lower() == "gpu":
+            parts = parts[1:]
+        if not parts:
+            continue
+        if parts and re.fullmatch(r'\d+', parts[-1]):
+            parts = parts[:-1]
+        label = ':'.join(parts).strip()
+        if not label:
+            label = "GPU"
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+    return labels
+
+
+def format_gpu_labels(labels: Iterable[str]) -> str:
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for label in labels:
+        label_clean = label.strip()
+        if not label_clean:
+            continue
+        key = label_clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(label_clean)
+    return ", ".join(ordered)
+
+
+def aggregate_gpu_counts(infos: Iterable[Dict[str, Any]]) -> List[Tuple[str, int]]:
+    counts: Dict[str, int] = {}
+    order: List[str] = []
+    for info in infos:
+        total = int(info.get('gpus_total') or 0)
+        labels = info.get('gpu_labels') or []
+        if not labels:
+            if total:
+                label = "unknown"
+                if label not in counts:
+                    counts[label] = 0
+                    order.append(label)
+                counts[label] += total
+            continue
+        if len(labels) == 1:
+            label = labels[0]
+            if label not in counts:
+                counts[label] = 0
+                order.append(label)
+            counts[label] += total or 1
+            continue
+        distributed_total = total if total else len(labels)
+        share = max(1, distributed_total // len(labels))
+        for label in labels:
+            if label not in counts:
+                counts[label] = 0
+                order.append(label)
+            counts[label] += share
+    return [(label, counts[label]) for label in order]
+
+
+def format_gpu_counts(counts: Iterable[Tuple[str, int]]) -> str:
+    parts: List[str] = []
+    for label, count in counts:
+        display_label = "unknown" if label == "unknown" else label
+        if count > 0:
+            parts.append(f"{count}x {display_label}")
+        else:
+            parts.append(display_label)
+    return ", ".join(parts)
+
+
 # --- Jobs & users per node ----------------------------------------------------
 
 def get_jobs_by_node() -> Dict[str, List[Dict[str, Any]]]:
@@ -313,6 +410,7 @@ def get_detailed_node_info(nodes: Iterable[str], include_jobs: bool = False) -> 
                 'gpus': '0',
                 'gpus_total': 0,
                 'gpus_in_use': 0,
+                'gpu_labels': [],
                 'state': 'unknown',
                 'users': [],
                 'user_count': 0,
@@ -346,6 +444,7 @@ def get_detailed_node_info(nodes: Iterable[str], include_jobs: bool = False) -> 
                             gres = part.split('=', 1)[1]
                             info['gpus'] = gres
                             info['gpus_total'] = extract_gpu_total(gres)
+                            info['gpu_labels'] = extract_gpu_labels(gres)
                 if 'GresUsed=' in line:
                     for part in line.split():
                         if part.startswith('GresUsed='):
@@ -774,17 +873,25 @@ def main_interactive(verbosity: int) -> None:
             available_count = sum(1 for i in infos if i['state'] in {'idle', 'mixed', 'mix'})
             gpu_in_use = sum(i['gpus_in_use'] for i in infos)
             gpu_total = sum(i['gpus_total'] for i in infos)
+            gpu_counts = aggregate_gpu_counts(infos) if gpus else []
+            gpu_type_desc = format_gpu_counts(gpu_counts) if gpu_counts else ""
             users_per_node = [len(i.get('users', [])) for i in infos]
             min_users = min(users_per_node) if users_per_node else 0
             max_users = max(users_per_node) if users_per_node else 0
             bullet = colorize("•", Fore.YELLOW, Style.BRIGHT) if COLOR_ENABLED else "•"
+            detail_parts = [
+                f"{available_count} available",
+                f"GPUs in use: {gpu_in_use}/{gpu_total}",
+            ]
+            if gpus:
+                gpu_label = gpu_type_desc or "unknown"
+                detail_parts.append(f"GPU type: {emphasize(gpu_label, Fore.MAGENTA)}")
+            if users_per_node:
+                detail_parts.append(f"users/node: {min_users}-{max_users}")
             summary = (
                 f"      {bullet} {len(bucket_nodes)} nodes: {mem_gb}GB RAM, {cpus} CPUs, {gpus} GPUs "
-                f"({available_count} available; GPUs in use: {gpu_in_use}/{gpu_total}"
+                f"({'; '.join(detail_parts)})"
             )
-            if users_per_node:
-                summary += f"; users/node: {min_users}-{max_users}"
-            summary += ")"
             print(summary)
 
             if verbosity >= 1 and len(bucket_nodes) <= 10:
@@ -797,6 +904,11 @@ def main_interactive(verbosity: int) -> None:
                     mem_str = f"{int(i['memory_gb'] or 0)}GB" if i['memory_gb'] else "N/A"
                     cpu_str = f"{i['cpus_alloc'] or 0}/{i['cpus_total'] or 'N/A'}"
                     gpu_usage = f"{i['gpus_in_use']}/{i['gpus_total']}"
+                    gpu_label_text = format_gpu_labels(i.get('gpu_labels', []))
+                    if not gpu_label_text and i['gpus_total']:
+                        gpu_label_text = "unknown"
+                    if gpu_label_text:
+                        gpu_usage = f"{gpu_usage} ({emphasize(gpu_label_text, Fore.MAGENTA)})"
                     extra = ""
                     if verbosity >= 2 and (i.get('jobs') or i.get('users')):
                         jobs_s = ",".join(str(j) for j in i.get('jobs', [])) or "-"
@@ -864,6 +976,11 @@ def main_interactive(verbosity: int) -> None:
         mem_str = f"{int(i['memory_gb'] or 0):.0f}GB" if i['memory_gb'] is not None else "N/A"
         cpu_str = f"{i['cpus_alloc'] or 0}/{i['cpus_total'] or 'N/A'}"
         gpu_str = f"{i['gpus_in_use']}/{i['gpus_total']}"
+        gpu_label_text = format_gpu_labels(i.get('gpu_labels', []))
+        if not gpu_label_text and i['gpus_total']:
+            gpu_label_text = "unknown"
+        if gpu_label_text:
+            gpu_str = f"{gpu_str} ({emphasize(gpu_label_text, Fore.MAGENTA)})"
         is_available = i['state'] in {'idle', 'mixed', 'mix'}
         marker = "✅" if is_available else " "
         user_count = len(i.get('users', []))

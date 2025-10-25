@@ -29,8 +29,29 @@ import jax, jax.numpy as jnp
 from dask import delayed
 from dask.distributed import Client, LocalCluster, progress
 from dask_jobqueue import SLURMCluster
-from functools import partial
+from functools import partial, lru_cache
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+
+try:
+    from colorama import Fore, Style, init as _colorama_init
+
+    _colorama_init()
+    COLOR_ENABLED = True
+except ImportError:  # pragma: no cover - optional enhancement
+    COLOR_ENABLED = False
+
+    class _DummyColors:
+        def __getattr__(self, item):
+            return ""
+
+    Fore = Style = _DummyColors()
+
+
+def colorize(text: str, *styles: str) -> str:
+    """Return colored text when colorama is available."""
+    if COLOR_ENABLED and styles:
+        return "".join(styles) + text + Style.RESET_ALL
+    return text
 
 
 # --- Configuration management ---
@@ -602,7 +623,97 @@ def parse_memory_string(mem_str):
     except:
         return None
 
-def get_detailed_node_info(nodes):
+def expand_nodelist(nodelist):
+    """Expand a SLURM nodelist expression into individual hostnames."""
+    if not nodelist or nodelist in {"(null)", "None"}:
+        return []
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "hostnames", nodelist],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except (subprocess.SubprocessError, FileNotFoundError):
+        # Fallback to the raw nodelist expression if expansion fails.
+        return [nodelist]
+
+
+def get_node_user_map():
+    """Return mapping of node -> set of users currently running jobs on that node."""
+    try:
+        result = subprocess.run(
+            "squeue -h -o '%u|%N'",
+            shell=True,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return {}
+
+    node_users = defaultdict(set)
+    expansion_cache: Dict[str, List[str]] = {}
+
+    for line in result.stdout.strip().splitlines():
+        if "|" not in line:
+            continue
+        user, nodelist = line.split("|", 1)
+        nodelist = nodelist.strip()
+        if not nodelist or nodelist in {"(null)", "None"}:
+            continue
+        if nodelist not in expansion_cache:
+            expansion_cache[nodelist] = expand_nodelist(nodelist)
+        for node in expansion_cache[nodelist]:
+            node_users[node].add(user.strip())
+
+    return node_users
+
+
+@lru_cache(maxsize=256)
+def query_users_for_node(node: str) -> List[str]:
+    """Fallback query for users on a specific node."""
+    try:
+        result = subprocess.run(
+            ["squeue", "-h", "-w", node, "-o", "%u"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        users = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        return sorted(users)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return []
+
+
+def extract_gpu_total(gres_value):
+    """Extract total GPU count from SLURM GRES/GRESUsed fields."""
+    if not gres_value:
+        return 0
+    gres_value = gres_value.strip()
+    if not gres_value or gres_value in {"(null)", "N/A", "none"}:
+        return 0
+    total = 0
+    for entry in gres_value.split(","):
+        entry = entry.strip()
+        if "gpu" not in entry.lower():
+            continue
+        # Remove metadata such as (IDX:0-1)
+        entry_core = entry.split("(", 1)[0]
+        parts = [part for part in entry_core.split(":") if part]
+        for part in reversed(parts):
+            match = re.search(r"(\d+)$", part)
+            if match:
+                total += int(match.group(1))
+                break
+    return total
+
+
+def get_detailed_node_info(nodes, node_user_map=None):
     """Get detailed information for a list of nodes."""
     node_info = {}
     
@@ -617,7 +728,11 @@ def get_detailed_node_info(nodes):
                 'cpus_total': None,
                 'cpus_alloc': None,
                 'gpus': '0',
-                'state': 'unknown'
+                'gpus_total': 0,
+                'gpus_in_use': 0,
+                'state': 'unknown',
+                'users': [],
+                'user_count': 0,
             }
             
             for line in output.split('\n'):
@@ -648,19 +763,51 @@ def get_detailed_node_info(nodes):
                 # GPUs
                 if 'Gres=' in line:
                     for part in line.split():
-                        if 'Gres=' in part:
+                        if part.startswith('Gres='):
                             gres = part.split('=')[1]
                             if 'gpu:' in gres:
                                 # Extract number of GPUs
                                 gpu_part = gres.split('gpu:')[1]
                                 # Handle formats like "gpu:4(S:0-1)" or "gpu:4"
                                 info['gpus'] = gpu_part.split('(')[0] if '(' in gpu_part else gpu_part
+                                info['gpus_total'] = extract_gpu_total(gres)
+                            else:
+                                info['gpus_total'] = extract_gpu_total(gres)
+
+                if 'GresUsed=' in line:
+                    for part in line.split():
+                        if part.startswith('GresUsed='):
+                            gres_used = part.split('=', 1)[1]
+                            info['gpus_in_use'] = extract_gpu_total(gres_used)
+                            break
+
+                if info['gpus_in_use'] == 0 and 'AllocTRES=' in line:
+                    for part in line.split():
+                        if part.startswith('AllocTRES='):
+                            tres = part.split('=', 1)[1]
+                            match = re.search(r'gres/gpu=(\d+)', tres)
+                            if match:
+                                info['gpus_in_use'] = int(match.group(1))
+                            break
                 
                 # State
                 if 'State=' in line:
                     for part in line.split():
                         if 'State=' in part:
                             info['state'] = part.split('=')[1].split('+')[0].lower()
+
+            if info['gpus_total'] == 0 and info.get('gpus'):
+                info['gpus_total'] = extract_gpu_total(info['gpus'])
+
+            if node_user_map is not None:
+                users = sorted(node_user_map.get(node, set()))
+                info['users'] = users
+                info['user_count'] = len(users)
+                if info['user_count'] == 0 and (info.get('gpus_in_use', 0) or info.get('cpus_alloc', 0)):
+                    fallback_users = query_users_for_node(node)
+                    if fallback_users:
+                        info['users'] = fallback_users
+                        info['user_count'] = len(fallback_users)
             
             node_info[node] = info
             
@@ -686,6 +833,8 @@ def get_idle_partitions():
             'nodes': set()
         })
         
+        expansion_cache = {}
+
         for line in lines:
             try:
                 parts = line.split('|')
@@ -702,7 +851,14 @@ def get_idle_partitions():
                     partition_data[partition]['gres'].add(gres)
                     # Parse node list
                     for node in nodes.split(','):
-                        partition_data[partition]['nodes'].add(node.strip())
+                        node = node.strip()
+                        if not node:
+                            continue
+                        if node not in expansion_cache:
+                            expansion_cache[node] = expand_nodelist(node)
+                        expanded_nodes = expansion_cache.get(node, [node])
+                        for expanded in expanded_nodes:
+                            partition_data[partition]['nodes'].add(expanded)
                         
             except (ValueError, IndexError):
                 continue
@@ -710,13 +866,16 @@ def get_idle_partitions():
         if not partition_data:
             return None
         
+        # Pre-compute current node usage so we can annotate interactive prompts.
+        node_user_map = get_node_user_map()
+
         # Now get detailed info for each partition's nodes
         choices = {}
         for i, (partition, data) in enumerate(partition_data.items()):
             nodes_list = sorted(data['nodes'])
             
             # Get detailed node information
-            node_details = get_detailed_node_info(nodes_list)
+            node_details = get_detailed_node_info(nodes_list, node_user_map)
             
             # Aggregate CPU stats
             cpu_info = None
@@ -775,13 +934,15 @@ def main_interactive():
         cpu_info = val['cpu_info']
         node_configs = val['node_configs']
         
-        print(f"[{key}] Partition: {partition}")
+        partition_heading = colorize(f"[{key}] Partition: {partition}", Style.BRIGHT, Fore.CYAN)
+        print(partition_heading)
         
         if cpu_info:
             avail = cpu_info['idle']
             total = cpu_info['total']
             alloc = cpu_info['allocated']
-            print(f"    CPUs: {avail}/{total} available ({alloc} in use)")
+            cpu_line = f"    CPUs: {avail}/{total} available ({alloc} in use)"
+            print(colorize(cpu_line, Style.BRIGHT, Fore.WHITE) if COLOR_ENABLED else cpu_line)
         
         print(f"    Nodes by configuration:")
         for config, node_list in sorted(node_configs.items(), key=lambda x: (x[0][0] or 0, x[0][1] or 0), reverse=True):
@@ -792,14 +953,47 @@ def main_interactive():
             gpu_str = format_gpu_count(gpus)
             
             available_count = sum(1 for _, info in node_list if info['state'] in ['idle', 'mixed', 'mix'])
+            gpu_in_use = sum(info.get('gpus_in_use', 0) or 0 for _, info in node_list)
+            gpu_total = sum(info.get('gpus_total', 0) or 0 for _, info in node_list)
+            users_per_node = [info.get('user_count', 0) for _, info in node_list]
+            min_users = min(users_per_node) if users_per_node else 0
+            max_users = max(users_per_node) if users_per_node else 0
+
+            bullet = colorize("•", Fore.YELLOW, Style.BRIGHT) if COLOR_ENABLED else "•"
+            summary = f"      {bullet} {count} nodes: {mem_str} RAM, {cpu_str} CPUs, {gpu_str} GPUs ({available_count} available"
+            if gpu_total or gpu_in_use:
+                summary += f"; GPUs in use: {gpu_in_use}/{gpu_total}"
+            if max_users:
+                if min_users == max_users:
+                    summary += f"; users/node: {max_users}"
+                else:
+                    summary += f"; users/node: {min_users}-{max_users}"
+            elif users_per_node:
+                summary += "; users/node: 0"
+            summary += ")"
             
-            print(f"      • {count} nodes: {mem_str} RAM, {cpu_str} CPUs, {gpu_str} GPUs ({available_count} available)")
+            print(summary)
             
             if count <= 10:
                 for node, info in sorted(node_list):
-                    state_icon = "✓" if info['state'] in ['idle', 'mixed', 'mix'] else "✗"
+                    state_good = info['state'] in ['idle', 'mixed', 'mix']
+                    state_icon = colorize("✓", Fore.GREEN) if state_good else colorize("✗", Fore.RED)
+                    state_text = colorize(info['state'], Fore.GREEN) if state_good else colorize(info['state'], Fore.RED)
+                    if not COLOR_ENABLED:
+                        state_icon = "✓" if state_good else "✗"
+                        state_text = info['state']
                     cpus_used = f"{info['cpus_alloc']}/{info['cpus_total']}" if info['cpus_alloc'] is not None else "N/A"
-                    print(f"        {state_icon} {node:<20} ({info['state']}, CPUs: {cpus_used})")
+                    gpus_total_value = info.get('gpus_total')
+                    gpus_total_str = "N/A" if gpus_total_value is None else str(gpus_total_value)
+                    gpu_usage = f"{info.get('gpus_in_use', 0)}/{gpus_total_str}"
+                    gpu_descriptor = info.get('gpus')
+                    if gpu_descriptor and gpu_descriptor not in {"0", "N/A"} and ':' in gpu_descriptor:
+                        type_label = ":".join(gpu_descriptor.split(':')[:-1]) or ""
+                        if type_label:
+                            gpu_usage = f"{gpu_usage} ({type_label})"
+                    user_count = info.get('user_count', 0)
+                    node_line = f"        {state_icon} {node:<20} ({state_text}, CPUs: {cpus_used}, GPUs: {gpu_usage}, Users: {user_count})"
+                    print(node_line)
         
         print("-"*90)
 
@@ -867,9 +1061,9 @@ def main_interactive():
 
     # 3. Node and GPU specification
     print(f"\n📍 Detailed node list for partition '{selected_partition}':")
-    print("="*90)
-    print(f"{'Idx':<5} {'Node':<22} {'State':<10} {'Memory':<12} {'CPUs (used/total)':<18} {'GPUs':<6}")
-    print("-"*90)
+    print("="*120)
+    print(f"{'Idx':<5} {'Node':<22} {'State':<10} {'Memory':<12} {'CPUs (used/total)':<20} {'GPUs (used/total)':<22} {'Users':<7}")
+    print("-"*120)
     
     available_for_selection = []
     sorted_nodes = sorted(available_nodes.items())
@@ -877,14 +1071,22 @@ def main_interactive():
         state = info['state']
         mem_str = f"{info['memory_gb']:.0f}GB" if info['memory_gb'] else "N/A"
         cpu_str = f"{info['cpus_alloc'] or 0}/{info['cpus_total'] or 'N/A'}"
-        gpu_str = format_gpu_count(info['gpus'])
+        gpus_total_value = info.get('gpus_total')
+        gpus_total_str = "N/A" if gpus_total_value is None else str(gpus_total_value)
+        gpu_usage = f"{info.get('gpus_in_use', 0)}/{gpus_total_str}"
+        gpu_descriptor = info.get('gpus')
+        if gpu_descriptor and gpu_descriptor not in {"0", "N/A"} and ':' in gpu_descriptor:
+            type_label = ":".join(gpu_descriptor.split(':')[:-1]) or ""
+            if type_label:
+                gpu_usage = f"{gpu_usage} ({type_label})"
         is_available = state in ['idle', 'mixed', 'mix']
         marker = "✅" if is_available else " "
-        print(f"{idx:<5} {marker} {node:<20} {state:<10} {mem_str:<12} {cpu_str:<18} {gpu_str:<6}")
+        user_count = info.get('user_count', 0)
+        print(f"{idx:<5} {marker} {node:<20} {state:<10} {mem_str:<12} {cpu_str:<20} {gpu_usage:<22} {user_count:<7}")
         if is_available:
             available_for_selection.append((idx, node))
     
-    print("="*90)
+    print("="*120)
     print(f"✓ = Available for job submission ({len(available_for_selection)} nodes)")
     print()
     

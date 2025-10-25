@@ -14,8 +14,13 @@ authors = [
 dependencies = [
   "dask[distributed]",
   "dask-jobqueue",
-  "jax",
   "numpy",
+  "colorama",
+]
+
+[project.optional-dependencies]
+test = [
+  "jax",
 ]
 
 [project.scripts]

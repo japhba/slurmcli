@@ -12,7 +12,8 @@ unchanged.
 Verbosity:
   default   : concise
   -v        : more detail (per-node lines when small buckets)
-  -vv       : show jobs & users on each node and include admin/hidden partitions (via `sinfo -a`)
+  -vv       : include admin/hidden partitions (via `sinfo -a`) and list job names per node
+  -vvv      : also show user lists per node
 
 """
 
@@ -330,7 +331,7 @@ def get_jobs_by_node() -> Dict[str, List[Dict[str, Any]]]:
     try:
         # %i jobid, %u user, %N nodelist
         result = subprocess.run(
-            "squeue -h -o '%i|%u|%N'",
+            "squeue -h -o '%i|%u|%j|%N'",
             shell=True, check=True, capture_output=True, text=True, timeout=8
         )
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -340,14 +341,18 @@ def get_jobs_by_node() -> Dict[str, List[Dict[str, Any]]]:
     for line in result.stdout.strip().splitlines():
         if '|' not in line:
             continue
-        jid_s, user, nodelist = line.split('|', 3)[:3]
+        parts = line.split('|', 3)
+        if len(parts) < 4:
+            continue
+        jid_s, user, job_name, nodelist = parts
         jid = None
         try:
             jid = int(jid_s)
         except Exception:
             pass
+        job_name = job_name.strip() or None
         for node in expand_nodelist(nodelist.strip()):
-            by_node[node].append({"id": jid, "user": user})
+            by_node[node].append({"id": jid, "user": user, "name": job_name})
     return by_node
 
 
@@ -471,7 +476,16 @@ def get_detailed_node_info(nodes: Iterable[str], include_jobs: bool = False) -> 
                     users = query_users_for_node(node)
                 info['users'] = users
                 info['user_count'] = len(users)
-                info['jobs'] = [j['id'] for j in jobs_by_node.get(node, []) if j.get('id')]
+                job_records = [
+                    {
+                        "id": j.get("id"),
+                        "user": j.get("user"),
+                        "name": j.get("name"),
+                    }
+                    for j in jobs_by_node.get(node, [])
+                ]
+                info['job_records'] = job_records
+                info['jobs'] = job_records
 
             node_info[node] = info
         except Exception:
@@ -909,12 +923,24 @@ def main_interactive(verbosity: int) -> None:
                         gpu_label_text = "unknown"
                     if gpu_label_text:
                         gpu_usage = f"{gpu_usage} ({emphasize(gpu_label_text, Fore.MAGENTA)})"
-                    extra = ""
-                    if verbosity >= 2 and (i.get('jobs') or i.get('users')):
-                        jobs_s = ",".join(str(j) for j in i.get('jobs', [])) or "-"
-                        users_s = ",".join(i.get('users', [])) or "-"
-                        extra = f" jobs:{jobs_s} users:{users_s}"
-                    print(f"        {state_icon} {node:<20} ({i['state']:<6}, RAM: {mem_str}, CPUs: {cpu_str}, GPUs: {gpu_usage}){extra}")
+                    print(f"        {state_icon} {node:<20} ({i['state']:<6}, RAM: {mem_str}, CPUs: {cpu_str}, GPUs: {gpu_usage})")
+                    detail_indent = " " * 12
+                    if verbosity >= 2:
+                        job_records = i.get('job_records') or i.get('jobs') or []
+                        job_summaries: List[str] = []
+                        for rec in job_records:
+                            if isinstance(rec, dict):
+                                name = rec.get('name') or "-"
+                                jid = rec.get('id')
+                                job_summaries.append(f"{name} (#{jid})" if jid else name)
+                            else:
+                                job_summaries.append(str(rec))
+                        if job_summaries:
+                            print(f"{detail_indent}jobs: {', '.join(job_summaries)}")
+                    if verbosity >= 3:
+                        users_list = i.get('users', [])
+                        if users_list:
+                            print(f"{detail_indent}users: {', '.join(users_list)}")
 
         print("-" * 90)
         part_index[idx] = pname
@@ -985,6 +1011,23 @@ def main_interactive(verbosity: int) -> None:
         marker = "✅" if is_available else " "
         user_count = len(i.get('users', []))
         print(f"{idx:<5} {marker} {nodes_in_part[idx-1]:<20} {i['state']:<10} {mem_str:<12} {cpu_str:<20} {gpu_str:<22} {user_count:<7}")
+        detail_indent = " " * 8
+        if verbosity >= 2:
+            job_records = i.get('job_records') or i.get('jobs') or []
+            job_summaries: List[str] = []
+            for rec in job_records:
+                if isinstance(rec, dict):
+                    name = rec.get('name') or "-"
+                    jid = rec.get('id')
+                    job_summaries.append(f"{name} (#{jid})" if jid else name)
+                else:
+                    job_summaries.append(str(rec))
+            if job_summaries:
+                print(f"{detail_indent}jobs: {', '.join(job_summaries)}")
+        if verbosity >= 3:
+            users_list = i.get('users', [])
+            if users_list:
+                print(f"{detail_indent}users: {', '.join(users_list)}")
         if is_available:
             available_for_selection.append((idx, nodes_in_part[idx-1]))
 
@@ -1130,7 +1173,7 @@ def main_interactive(verbosity: int) -> None:
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Interactive Dask-on-Slurm launcher (CLI-based Slurm introspection)")
     p.add_argument("--local", action="store_true", help="Launch a local Dask cluster instead of Slurm")
-    p.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (-v, -vv)")
+    p.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (-v, -vv, -vvv)")
     return p.parse_args(argv)
 
 

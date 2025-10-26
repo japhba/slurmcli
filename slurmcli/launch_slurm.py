@@ -14,6 +14,7 @@ Verbosity:
   -v        : more detail (per-node lines when small buckets)
   -vv       : include admin/hidden partitions (via `sinfo -a`) and list job names per node
   -vvv      : also show user lists per node
+  -vvvv     : include reserved resources for each job
 
 """
 
@@ -326,6 +327,78 @@ def format_gpu_counts(counts: Iterable[Tuple[str, int]]) -> str:
 
 # --- Jobs & users per node ----------------------------------------------------
 
+JOB_RESOURCE_CACHE: Dict[int, Dict[str, Any]] = {}
+
+
+def _extract_field(text: str, key: str) -> Optional[str]:
+    m = re.search(rf"{re.escape(key)}=([^\s]+)", text)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _format_tres_string(tres: str) -> str:
+    items: List[str] = []
+    for raw in tres.split(','):
+        entry = raw.strip()
+        if not entry:
+            continue
+        if '=' not in entry:
+            items.append(entry)
+            continue
+        key, value = entry.split('=', 1)
+        key = key.strip()
+        value = value.strip()
+        if key.startswith('gres/'):
+            key = key.split('/', 1)[1]
+        items.append(f"{key}={value}")
+    return ", ".join(items)
+
+
+def _summarize_job_resources(alloc_tres: Optional[str], req_tres: Optional[str], req_mem: Optional[str]) -> Optional[str]:
+    tres_source = alloc_tres or req_tres
+    parts: List[str] = []
+    if tres_source:
+        parts.append(_format_tres_string(tres_source))
+    if req_mem and (not tres_source or 'mem=' not in tres_source):
+        parts.append(f"mem={req_mem}")
+    if not parts:
+        return None
+    return "; ".join(parts)
+
+
+def get_job_resource_details(job_id: Optional[int]) -> Dict[str, Any]:
+    if job_id is None:
+        return {}
+    cached = JOB_RESOURCE_CACHE.get(job_id)
+    if cached is not None:
+        return cached
+
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "job", str(job_id)],
+            check=True, capture_output=True, text=True, timeout=8,
+        )
+        output = result.stdout
+    except (subprocess.SubprocessError, FileNotFoundError):
+        JOB_RESOURCE_CACHE[job_id] = {}
+        return {}
+
+    alloc_tres = _extract_field(output, "AllocTRES")
+    req_tres = _extract_field(output, "ReqTRES")
+    req_mem = _extract_field(output, "ReqMem")
+
+    summary = _summarize_job_resources(alloc_tres, req_tres, req_mem)
+    details = {
+        "alloc_tres": alloc_tres,
+        "req_tres": req_tres,
+        "req_mem": req_mem,
+        "summary": summary,
+    }
+    JOB_RESOURCE_CACHE[job_id] = details
+    return details
+
+
 def get_jobs_by_node() -> Dict[str, List[Dict[str, Any]]]:
     """Return mapping node -> list of jobs {id,user} currently assigned there."""
     try:
@@ -397,7 +470,12 @@ def query_users_for_node(node: str) -> List[str]:
         return []
 
 
-def get_detailed_node_info(nodes: Iterable[str], include_jobs: bool = False) -> Dict[str, Dict[str, Any]]:
+def get_detailed_node_info(
+    nodes: Iterable[str],
+    *,
+    include_jobs: bool = False,
+    include_job_resources: bool = False,
+) -> Dict[str, Dict[str, Any]]:
     node_users_map = get_node_user_map() if include_jobs else {}
     jobs_by_node = get_jobs_by_node() if include_jobs else {}
 
@@ -476,14 +554,18 @@ def get_detailed_node_info(nodes: Iterable[str], include_jobs: bool = False) -> 
                     users = query_users_for_node(node)
                 info['users'] = users
                 info['user_count'] = len(users)
-                job_records = [
-                    {
-                        "id": j.get("id"),
-                        "user": j.get("user"),
-                        "name": j.get("name"),
-                    }
-                    for j in jobs_by_node.get(node, [])
-                ]
+                job_records = []
+                for j in jobs_by_node.get(node, []):
+                    jid = j.get("id")
+                    resources = get_job_resource_details(jid) if include_job_resources else {}
+                    job_records.append(
+                        {
+                            "id": jid,
+                            "user": j.get("user"),
+                            "name": j.get("name"),
+                            "resources": resources,
+                        }
+                    )
                 info['job_records'] = job_records
                 info['jobs'] = job_records
 
@@ -846,6 +928,7 @@ def prompt_for_value(prompt_text: str, default: Any, type_converter=str):
 def main_interactive(verbosity: int) -> None:
     show_admin = verbosity >= 2
     include_jobs = verbosity >= 2
+    include_job_resources = verbosity >= 4
 
     parts = get_partitions(show_all=show_admin)
     if not parts:
@@ -857,7 +940,11 @@ def main_interactive(verbosity: int) -> None:
 
     # Collect detailed node info once
     all_nodes = sorted({n for p in parts.values() for n in p["nodes"]})
-    node_details_all = get_detailed_node_info(all_nodes, include_jobs=include_jobs)
+    node_details_all = get_detailed_node_info(
+        all_nodes,
+        include_jobs=include_jobs,
+        include_job_resources=include_job_resources,
+    )
 
     part_index: Dict[int, str] = {}
     for idx, pdata in sorted(parts.items()):
@@ -926,17 +1013,27 @@ def main_interactive(verbosity: int) -> None:
                     print(f"        {state_icon} {node:<20} ({i['state']:<6}, RAM: {mem_str}, CPUs: {cpu_str}, GPUs: {gpu_usage})")
                     detail_indent = " " * 12
                     if verbosity >= 2:
-                        job_records = i.get('job_records') or i.get('jobs') or []
-                        job_summaries: List[str] = []
-                        for rec in job_records:
-                            if isinstance(rec, dict):
-                                name = rec.get('name') or "-"
-                                jid = rec.get('id')
-                                job_summaries.append(f"{name} (#{jid})" if jid else name)
+                        job_records = [rec for rec in (i.get('job_records') or []) if isinstance(rec, dict)]
+                        if job_records:
+                            if verbosity >= 4:
+                                print(f"{detail_indent}jobs:")
+                                for rec in job_records:
+                                    name = rec.get('name') or "-"
+                                    jid = rec.get('id')
+                                    label = f"{name} (#{jid})" if jid else name
+                                    resource_summary = (rec.get('resources') or {}).get('summary')
+                                    if resource_summary:
+                                        print(f"{detail_indent}  - {label} | {resource_summary}")
+                                    else:
+                                        print(f"{detail_indent}  - {label}")
                             else:
-                                job_summaries.append(str(rec))
-                        if job_summaries:
-                            print(f"{detail_indent}jobs: {', '.join(job_summaries)}")
+                                job_summaries: List[str] = []
+                                for rec in job_records:
+                                    name = rec.get('name') or "-"
+                                    jid = rec.get('id')
+                                    job_summaries.append(f"{name} (#{jid})" if jid else name)
+                                if job_summaries:
+                                    print(f"{detail_indent}jobs: {', '.join(job_summaries)}")
                     if verbosity >= 3:
                         users_list = i.get('users', [])
                         if users_list:
@@ -1013,17 +1110,27 @@ def main_interactive(verbosity: int) -> None:
         print(f"{idx:<5} {marker} {nodes_in_part[idx-1]:<20} {i['state']:<10} {mem_str:<12} {cpu_str:<20} {gpu_str:<22} {user_count:<7}")
         detail_indent = " " * 8
         if verbosity >= 2:
-            job_records = i.get('job_records') or i.get('jobs') or []
-            job_summaries: List[str] = []
-            for rec in job_records:
-                if isinstance(rec, dict):
-                    name = rec.get('name') or "-"
-                    jid = rec.get('id')
-                    job_summaries.append(f"{name} (#{jid})" if jid else name)
+            job_records = [rec for rec in (i.get('job_records') or []) if isinstance(rec, dict)]
+            if job_records:
+                if verbosity >= 4:
+                    print(f"{detail_indent}jobs:")
+                    for rec in job_records:
+                        name = rec.get('name') or "-"
+                        jid = rec.get('id')
+                        label = f"{name} (#{jid})" if jid else name
+                        resource_summary = (rec.get('resources') or {}).get('summary')
+                        if resource_summary:
+                            print(f"{detail_indent}  - {label} | {resource_summary}")
+                        else:
+                            print(f"{detail_indent}  - {label}")
                 else:
-                    job_summaries.append(str(rec))
-            if job_summaries:
-                print(f"{detail_indent}jobs: {', '.join(job_summaries)}")
+                    job_summaries: List[str] = []
+                    for rec in job_records:
+                        name = rec.get('name') or "-"
+                        jid = rec.get('id')
+                        job_summaries.append(f"{name} (#{jid})" if jid else name)
+                    if job_summaries:
+                        print(f"{detail_indent}jobs: {', '.join(job_summaries)}")
         if verbosity >= 3:
             users_list = i.get('users', [])
             if users_list:
@@ -1173,7 +1280,7 @@ def main_interactive(verbosity: int) -> None:
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Interactive Dask-on-Slurm launcher (CLI-based Slurm introspection)")
     p.add_argument("--local", action="store_true", help="Launch a local Dask cluster instead of Slurm")
-    p.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (-v, -vv, -vvv)")
+    p.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (-v, -vv, -vvv, -vvvv)")
     return p.parse_args(argv)
 
 

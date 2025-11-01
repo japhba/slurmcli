@@ -1,5 +1,7 @@
 import time
 from functools import partial
+from pathlib import Path
+from typing import Optional, Tuple
 
 import numpy as np
 import jax, jax.numpy as jnp
@@ -9,13 +11,64 @@ from dask.distributed import Client, progress
 from .launch_slurm import SCHEDULER_HOST, PORT_SLURM_SCHEDULER
 
 
+SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
+DEFAULT_SCHEDULER_ADDRESS = f"tcp://{SCHEDULER_HOST}:{PORT_SLURM_SCHEDULER}"
+
+
+def _load_saved_scheduler_address() -> Optional[str]:
+    """Return scheduler address stored on disk, if available."""
+    try:
+        raw = SCHEDULER_ADDRESS_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        print(f"⚠️ Unable to read {SCHEDULER_ADDRESS_FILE}: {exc}")
+        return None
+    if not raw:
+        return None
+    return raw if "://" in raw else f"tcp://{raw}"
+
+
+def _connect_to_scheduler() -> Tuple[Client, str]:
+    """Connect to a running scheduler, preferring the last recorded address."""
+    attempts = []
+    saved_addr = _load_saved_scheduler_address()
+    if saved_addr:
+        attempts.append(("saved", saved_addr))
+    attempts.append(("configured", DEFAULT_SCHEDULER_ADDRESS))
+
+    last_error: Optional[Exception] = None
+    for source, address in attempts:
+        try:
+            client = Client(address)
+            if source == "saved":
+                print(f"ℹ️ Using scheduler address from {SCHEDULER_ADDRESS_FILE}: {address}")
+            else:
+                print(f"ℹ️ Using configured scheduler address: {address}")
+            return client, address
+        except Exception as exc:
+            print(f"⚠️ Failed to connect to scheduler via {source} address ({address}): {exc}")
+            last_error = exc
+
+    raise RuntimeError("Unable to connect to Dask scheduler") from last_error
+
+
 def get_client() -> Client:
-    client = Client(f"tcp://{SCHEDULER_HOST}:{PORT_SLURM_SCHEDULER}")
-    
+    client, _ = _connect_to_scheduler()
+
     # Print connection info
     print("🚀 Connected to scheduler:", client.scheduler.address)
     print("Client status:", client.status)
     return client
+
+
+def close_workers():
+    client, address_used = _connect_to_scheduler()
+    workers = list(client.scheduler_info()["workers"])
+
+    print(f"ℹ️ Retiring workers connected to {address_used}")
+    client.retire_workers(workers=workers, close_workers=True, remove=True)
+    client.close()
 
 
 def main() -> None:

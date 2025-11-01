@@ -174,9 +174,22 @@ PORT_SLURM_DASHBOARD = int(CONFIG.get("dashboard_port"))
 JUPYTER_PORT = int(CONFIG.get("jupyter_port"))
 VENV_ACTIVATE = CONFIG.get("venv_activate")
 DEFAULT_JUPYTER_RUNTIME_BASE = "/tmp/jrt"
+SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
 
 
 # --- Helper parsers for CLI output -------------------------------------------
+
+def is_port_available(port: Optional[int]) -> bool:
+    """Return True if the given TCP port can be bound on the current host."""
+    if port is None or port <= 0:
+        return True
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("", int(port)))
+        except OSError:
+            return False
+    return True
 
 def parse_cpu_string(cpu_str: str) -> Optional[Dict[str, int]]:
     try:
@@ -670,6 +683,17 @@ def get_cluster(
     num_jobs = int(max(1, num_jobs))
     cores_for_job = threads_per_worker * processes
 
+    dashboard_address = f":{PORT_SLURM_DASHBOARD}" if PORT_SLURM_DASHBOARD else None
+    scheduler_port_configured = PORT_SLURM_SCHEDULER
+    scheduler_port = scheduler_port_configured
+    if scheduler_port and scheduler_port > 0 and not is_port_available(scheduler_port):
+        print(f"⚠️ Dask scheduler port {scheduler_port} already in use; requesting an ephemeral port instead.")
+        scheduler_port = 0
+
+    scheduler_options: Dict[str, Any] = {"port": scheduler_port if scheduler_port is not None else 0}
+    if dashboard_address:
+        scheduler_options["dashboard_address"] = dashboard_address
+
     if local:
         print("🚀 Starting a local Dask cluster…")
         n_workers_local = num_jobs * processes
@@ -678,6 +702,8 @@ def get_cluster(
             threads_per_worker=threads_per_worker,
             memory_limit=memory,
             processes=True,
+            scheduler_port=scheduler_port if scheduler_port is not None else 0,
+            dashboard_address=dashboard_address,
         )
         client = Client(cluster)
     else:
@@ -712,10 +738,7 @@ def get_cluster(
             log_directory=log_dir,
             job_script_prologue=prologue,
             job_extra_directives=job_extra_directives,
-            scheduler_options={
-                "port": PORT_SLURM_SCHEDULER,
-                "dashboard_address": f":{PORT_SLURM_DASHBOARD}",
-            },
+            scheduler_options=scheduler_options,
         )
         cluster.scale(n=num_jobs)
         client = Client(cluster)
@@ -1198,8 +1221,8 @@ def main_interactive(verbosity: int) -> None:
         print("\n✅ Dask cluster is running!")
         print(f"   Reconnect with: Client('{client.scheduler.address}')")
         try:
-            Path(".dask_scheduler_address").write_text(client.scheduler.address)
-            print("   Scheduler address saved to .dask_scheduler_address")
+            SCHEDULER_ADDRESS_FILE.write_text(client.scheduler.address)
+            print(f"   Scheduler address saved to {SCHEDULER_ADDRESS_FILE}")
         except Exception:
             pass
 

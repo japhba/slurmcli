@@ -380,6 +380,28 @@ def _summarize_job_resources(alloc_tres: Optional[str], req_tres: Optional[str],
     return "; ".join(parts)
 
 
+def _sanitize_time_field(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text or text in {"-", "UNLIMITED", "N/A", "Not Set", "NOT_SET", "None"}:
+        return None
+    return text
+
+
+def _format_job_time_info(elapsed: Optional[str], remaining: Optional[str]) -> Optional[str]:
+    elapsed_clean = _sanitize_time_field(elapsed)
+    remaining_clean = _sanitize_time_field(remaining)
+    time_bits: List[str] = []
+    if elapsed_clean:
+        time_bits.append(f"elapsed {elapsed_clean}")
+    if remaining_clean:
+        time_bits.append(f"left {remaining_clean}")
+    if not time_bits:
+        return None
+    return ", ".join(time_bits)
+
+
 def get_job_resource_details(job_id: Optional[int]) -> Dict[str, Any]:
     if job_id is None:
         return {}
@@ -415,9 +437,9 @@ def get_job_resource_details(job_id: Optional[int]) -> Dict[str, Any]:
 def get_jobs_by_node() -> Dict[str, List[Dict[str, Any]]]:
     """Return mapping node -> list of jobs {id,user} currently assigned there."""
     try:
-        # %i jobid, %u user, %N nodelist
+        # %i jobid, %u user, %j jobname, %M elapsed, %L time-left, %N nodelist
         result = subprocess.run(
-            "squeue -h -o '%i|%u|%j|%N'",
+            "squeue -h -o '%i|%u|%j|%M|%L|%N'",
             shell=True, check=True, capture_output=True, text=True, timeout=8
         )
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -427,18 +449,28 @@ def get_jobs_by_node() -> Dict[str, List[Dict[str, Any]]]:
     for line in result.stdout.strip().splitlines():
         if '|' not in line:
             continue
-        parts = line.split('|', 3)
-        if len(parts) < 4:
+        parts = line.split('|', 5)
+        if len(parts) < 6:
             continue
-        jid_s, user, job_name, nodelist = parts
+        jid_s, user, job_name, elapsed, time_left, nodelist = parts[:6]
         jid = None
         try:
             jid = int(jid_s)
         except Exception:
             pass
         job_name = job_name.strip() or None
+        elapsed_clean = _sanitize_time_field(elapsed)
+        time_left_clean = _sanitize_time_field(time_left)
         for node in expand_nodelist(nodelist.strip()):
-            by_node[node].append({"id": jid, "user": user, "name": job_name})
+            by_node[node].append(
+                {
+                    "id": jid,
+                    "user": user,
+                    "name": job_name,
+                    "elapsed": elapsed_clean,
+                    "time_left": time_left_clean,
+                }
+            )
     return by_node
 
 
@@ -576,6 +608,8 @@ def get_detailed_node_info(
                             "id": jid,
                             "user": j.get("user"),
                             "name": j.get("name"),
+                            "elapsed": j.get("elapsed"),
+                            "time_left": j.get("time_left"),
                             "resources": resources,
                         }
                     )
@@ -1044,9 +1078,15 @@ def main_interactive(verbosity: int) -> None:
                                     name = rec.get('name') or "-"
                                     jid = rec.get('id')
                                     label = f"{name} (#{jid})" if jid else name
+                                    time_info = _format_job_time_info(rec.get("elapsed"), rec.get("time_left"))
                                     resource_summary = (rec.get('resources') or {}).get('summary')
+                                    detail_bits: List[str] = []
                                     if resource_summary:
-                                        print(f"{detail_indent}  - {label} | {resource_summary}")
+                                        detail_bits.append(resource_summary)
+                                    if time_info:
+                                        detail_bits.append(f"time {time_info}")
+                                    if detail_bits:
+                                        print(f"{detail_indent}  - {label} | {' | '.join(detail_bits)}")
                                     else:
                                         print(f"{detail_indent}  - {label}")
                             else:
@@ -1054,7 +1094,11 @@ def main_interactive(verbosity: int) -> None:
                                 for rec in job_records:
                                     name = rec.get('name') or "-"
                                     jid = rec.get('id')
-                                    job_summaries.append(f"{name} (#{jid})" if jid else name)
+                                    label = f"{name} (#{jid})" if jid else name
+                                    time_info = _format_job_time_info(rec.get("elapsed"), rec.get("time_left"))
+                                    if time_info:
+                                        label = f"{label} [{time_info}]"
+                                    job_summaries.append(label)
                                 if job_summaries:
                                     print(f"{detail_indent}jobs: {', '.join(job_summaries)}")
                     if verbosity >= 3:
@@ -1141,9 +1185,15 @@ def main_interactive(verbosity: int) -> None:
                         name = rec.get('name') or "-"
                         jid = rec.get('id')
                         label = f"{name} (#{jid})" if jid else name
+                        time_info = _format_job_time_info(rec.get("elapsed"), rec.get("time_left"))
                         resource_summary = (rec.get('resources') or {}).get('summary')
+                        detail_bits: List[str] = []
                         if resource_summary:
-                            print(f"{detail_indent}  - {label} | {resource_summary}")
+                            detail_bits.append(resource_summary)
+                        if time_info:
+                            detail_bits.append(f"time {time_info}")
+                        if detail_bits:
+                            print(f"{detail_indent}  - {label} | {' | '.join(detail_bits)}")
                         else:
                             print(f"{detail_indent}  - {label}")
                 else:
@@ -1151,7 +1201,11 @@ def main_interactive(verbosity: int) -> None:
                     for rec in job_records:
                         name = rec.get('name') or "-"
                         jid = rec.get('id')
-                        job_summaries.append(f"{name} (#{jid})" if jid else name)
+                        label = f"{name} (#{jid})" if jid else name
+                        time_info = _format_job_time_info(rec.get("elapsed"), rec.get("time_left"))
+                        if time_info:
+                            label = f"{label} [{time_info}]"
+                        job_summaries.append(label)
                     if job_summaries:
                         print(f"{detail_indent}jobs: {', '.join(job_summaries)}")
         if verbosity >= 3:

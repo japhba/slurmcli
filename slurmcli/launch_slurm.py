@@ -699,7 +699,7 @@ def get_cluster(
     threads_per_worker: Optional[int] = None,
     cores: int = CORES,
     memory: str = f"{MEMORY_GB_DEFAULT}GB",
-    queue: str = "cpu",
+    queue: Optional[str] = None,
     account: str = "gcnu-ac",
     walltime: str = WALLTIME,
     log_dir: str = "dask_logs",
@@ -741,7 +741,8 @@ def get_cluster(
         )
         client = Client(cluster)
     else:
-        print(f"🚀 Submitting {num_jobs} jobs to the '{queue}' SLURM partition…")
+        queue_label = f"the '{queue}' SLURM partition" if queue else "the default SLURM partition"
+        print(f"🚀 Submitting {num_jobs} jobs to {queue_label}…")
         os.makedirs(log_dir, exist_ok=True)
         prologue: List[str] = []
         if venv_activate:
@@ -1004,6 +1005,7 @@ def main_interactive(verbosity: int) -> None:
     )
 
     part_index: Dict[int, str] = {}
+    partition_by_name: Dict[str, Dict[str, Any]] = {}
     for idx, pdata in sorted(parts.items()):
         pname = pdata['partition']
         nodes = pdata['nodes']
@@ -1108,20 +1110,31 @@ def main_interactive(verbosity: int) -> None:
 
         print("-" * 90)
         part_index[idx] = pname
+        partition_by_name[pname] = pdata
+
+    print("\n[0] Use default cluster partition (no explicit selection)")
 
     # 1) Select partition
+    selected_partition: Optional[str] = None
     while True:
+        raw_choice = input("\n➡️  Enter the number of your choice (press Enter for default): ").strip()
+        if raw_choice in {"", "0"}:
+            selected_partition = None
+            break
         try:
-            choice = int(input("\n➡️  Enter the number of your choice: "))
+            choice = int(raw_choice)
             if choice in part_index:
                 selected_partition = part_index[choice]
                 break
             else:
-                print(f"❌ Invalid choice. Please select a number from 1 to {len(part_index)}.")
+                print(f"❌ Invalid choice. Please select a number from 1 to {len(part_index)}, or press Enter for the default.")
         except ValueError:
-            print("❌ Please enter a valid number.")
+            print("❌ Please enter a valid number or press Enter for the default.")
 
-    print(f"\n✅ You selected partition: '{selected_partition}'")
+    if selected_partition:
+        print(f"\n✅ You selected partition: '{selected_partition}'")
+    else:
+        print("\n✅ Using SLURM's default partition (no explicit queue).")
 
     launch_kernels_choice = input("\n🧪 Start a Jupyter server on each worker after launch? (y/n): ").strip().lower()
     launch_kernels = launch_kernels_choice == 'y'
@@ -1153,82 +1166,89 @@ def main_interactive(verbosity: int) -> None:
     total_cores_for_job = threads_per_worker * processes
 
     # 3) Node selection within chosen partition
-    nodes_in_part = parts[[k for k, v in parts.items() if v['partition'] == selected_partition][0]]['nodes']
-    nodes_info_part = [node_details_all[n] for n in nodes_in_part if n in node_details_all]
+    nodelist: Optional[str] = None
+    if selected_partition:
+        selected_partition_data = partition_by_name.get(selected_partition)
+        if not selected_partition_data:
+            print("⚠️  Unable to load node information for the selected partition; skipping node selection.")
+        else:
+            nodes_in_part = selected_partition_data['nodes']
+            nodes_info_part = [node_details_all[n] for n in nodes_in_part if n in node_details_all]
 
-    print(f"\n📍 Detailed node list for partition '{selected_partition}':")
-    print("=" * 120)
-    print(f"{'Idx':<5} {'Node':<22} {'State':<10} {'Memory':<12} {'CPUs (used/total)':<20} {'GPUs (used/total)':<22} {'Users':<7}")
-    print("-" * 120)
+            print(f"\n📍 Detailed node list for partition '{selected_partition}':")
+            print("=" * 120)
+            print(f"{'Idx':<5} {'Node':<22} {'State':<10} {'Memory':<12} {'CPUs (used/total)':<20} {'GPUs (used/total)':<22} {'Users':<7}")
+            print("-" * 120)
 
-    available_for_selection: List[Tuple[int, str]] = []
-    for idx, i in enumerate(sorted(nodes_info_part, key=lambda x: x['state']+str(x.get('cpus_total') or 0)), start=1):
-        mem_str = f"{int(i['memory_gb'] or 0):.0f}GB" if i['memory_gb'] is not None else "N/A"
-        cpu_str = f"{i['cpus_alloc'] or 0}/{i['cpus_total'] or 'N/A'}"
-        gpu_str = f"{i['gpus_in_use']}/{i['gpus_total']}"
-        gpu_label_text = format_gpu_labels(i.get('gpu_labels', []))
-        if not gpu_label_text and i['gpus_total']:
-            gpu_label_text = "unknown"
-        if gpu_label_text:
-            gpu_str = f"{gpu_str} ({emphasize(gpu_label_text, Fore.MAGENTA)})"
-        is_available = i['state'] in {'idle', 'mixed', 'mix'}
-        marker = "✅" if is_available else " "
-        user_count = len(i.get('users', []))
-        print(f"{idx:<5} {marker} {nodes_in_part[idx-1]:<20} {i['state']:<10} {mem_str:<12} {cpu_str:<20} {gpu_str:<22} {user_count:<7}")
-        detail_indent = " " * 8
-        if verbosity >= 2:
-            job_records = [rec for rec in (i.get('job_records') or []) if isinstance(rec, dict)]
-            if job_records:
-                if verbosity >= 4:
-                    print(f"{detail_indent}jobs:")
-                    for rec in job_records:
-                        name = rec.get('name') or "-"
-                        jid = rec.get('id')
-                        label = f"{name} (#{jid})" if jid else name
-                        time_info = _format_job_time_info(rec.get("elapsed"), rec.get("time_left"))
-                        resource_summary = (rec.get('resources') or {}).get('summary')
-                        detail_bits: List[str] = []
-                        if resource_summary:
-                            detail_bits.append(resource_summary)
-                        if time_info:
-                            detail_bits.append(f"time {time_info}")
-                        if detail_bits:
-                            print(f"{detail_indent}  - {label} | {' | '.join(detail_bits)}")
+            available_for_selection: List[Tuple[int, str]] = []
+            for idx, i in enumerate(sorted(nodes_info_part, key=lambda x: x['state'] + str(x.get('cpus_total') or 0)), start=1):
+                mem_str = f"{int(i['memory_gb'] or 0):.0f}GB" if i['memory_gb'] is not None else "N/A"
+                cpu_str = f"{i['cpus_alloc'] or 0}/{i['cpus_total'] or 'N/A'}"
+                gpu_str = f"{i['gpus_in_use']}/{i['gpus_total']}"
+                gpu_label_text = format_gpu_labels(i.get('gpu_labels', []))
+                if not gpu_label_text and i['gpus_total']:
+                    gpu_label_text = "unknown"
+                if gpu_label_text:
+                    gpu_str = f"{gpu_str} ({emphasize(gpu_label_text, Fore.MAGENTA)})"
+                is_available = i['state'] in {'idle', 'mixed', 'mix'}
+                marker = "✅" if is_available else " "
+                user_count = len(i.get('users', []))
+                print(f"{idx:<5} {marker} {nodes_in_part[idx-1]:<20} {i['state']:<10} {mem_str:<12} {cpu_str:<20} {gpu_str:<22} {user_count:<7}")
+                detail_indent = " " * 8
+                if verbosity >= 2:
+                    job_records = [rec for rec in (i.get('job_records') or []) if isinstance(rec, dict)]
+                    if job_records:
+                        if verbosity >= 4:
+                            print(f"{detail_indent}jobs:")
+                            for rec in job_records:
+                                name = rec.get('name') or "-"
+                                jid = rec.get('id')
+                                label = f"{name} (#{jid})" if jid else name
+                                time_info = _format_job_time_info(rec.get("elapsed"), rec.get("time_left"))
+                                resource_summary = (rec.get('resources') or {}).get('summary')
+                                detail_bits: List[str] = []
+                                if resource_summary:
+                                    detail_bits.append(resource_summary)
+                                if time_info:
+                                    detail_bits.append(f"time {time_info}")
+                                if detail_bits:
+                                    print(f"{detail_indent}  - {label} | {' | '.join(detail_bits)}")
+                                else:
+                                    print(f"{detail_indent}  - {label}")
                         else:
-                            print(f"{detail_indent}  - {label}")
-                else:
-                    job_summaries: List[str] = []
-                    for rec in job_records:
-                        name = rec.get('name') or "-"
-                        jid = rec.get('id')
-                        label = f"{name} (#{jid})" if jid else name
-                        time_info = _format_job_time_info(rec.get("elapsed"), rec.get("time_left"))
-                        if time_info:
-                            label = f"{label} [{time_info}]"
-                        job_summaries.append(label)
-                    if job_summaries:
-                        print(f"{detail_indent}jobs: {', '.join(job_summaries)}")
-        if verbosity >= 3:
-            users_list = i.get('users', [])
-            if users_list:
-                print(f"{detail_indent}users: {', '.join(users_list)}")
-        if is_available:
-            available_for_selection.append((idx, nodes_in_part[idx-1]))
+                            job_summaries: List[str] = []
+                            for rec in job_records:
+                                name = rec.get('name') or "-"
+                                jid = rec.get('id')
+                                label = f"{name} (#{jid})" if jid else name
+                                time_info = _format_job_time_info(rec.get("elapsed"), rec.get("time_left"))
+                                if time_info:
+                                    label = f"{label} [{time_info}]"
+                                job_summaries.append(label)
+                            if job_summaries:
+                                print(f"{detail_indent}jobs: {', '.join(job_summaries)}")
+                if verbosity >= 3:
+                    users_list = i.get('users', [])
+                    if users_list:
+                        print(f"{detail_indent}users: {', '.join(users_list)}")
+                if is_available:
+                    available_for_selection.append((idx, nodes_in_part[idx-1]))
 
-    print("=" * 120)
-    print(f"✓ = Available for job submission ({len(available_for_selection)} nodes)\n")
+            print("=" * 120)
+            print(f"✓ = Available for job submission ({len(available_for_selection)} nodes)\n")
 
-    nodelist_choice = input("Enter index of specific node to use (leave empty for any): ").strip()
-    nodelist = None
-    if nodelist_choice:
-        try:
-            nidx = int(nodelist_choice)
-            if 1 <= nidx <= len(nodes_in_part):
-                nodelist = nodes_in_part[nidx - 1]
-            else:
-                print("⚠️  Invalid index; proceeding without a specific node.")
-        except ValueError:
-            print("⚠️  Invalid input; proceeding without a specific node.")
+            nodelist_choice = input("Enter index of specific node to use (leave empty for any): ").strip()
+            if nodelist_choice:
+                try:
+                    nidx = int(nodelist_choice)
+                    if 1 <= nidx <= len(nodes_in_part):
+                        nodelist = nodes_in_part[nidx - 1]
+                    else:
+                        print("⚠️  Invalid index; proceeding without a specific node.")
+                except ValueError:
+                    print("⚠️  Invalid input; proceeding without a specific node.")
+    else:
+        print("\nℹ️  Skipping node-specific selection; SLURM will apply its default partition rules.")
 
     num_gpus = prompt_for_value("Enter number of GPUs per process (0 for CPU-only)", 0, int)
     gres = f"gpu:{num_gpus}" if num_gpus > 0 else None
@@ -1237,7 +1257,8 @@ def main_interactive(verbosity: int) -> None:
     print("\n" + "=" * 50)
     print("📋 LAUNCH SUMMARY")
     print("=" * 50)
-    print(f"  Partition / Queue: {selected_partition}")
+    partition_display = selected_partition or "SLURM default (no explicit queue)"
+    print(f"  Partition / Queue: {partition_display}")
     print(f"  Walltime:          {walltime}")
     print(f"  SLURM Jobs:        {num_jobs}")
     print(f"  Processes per job: {processes}")

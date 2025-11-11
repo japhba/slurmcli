@@ -3,12 +3,62 @@ from functools import partial
 from pathlib import Path
 from typing import Optional, Tuple
 
-import numpy as np
-import jax, jax.numpy as jnp
+import sys, threading, atexit
+from collections import defaultdict
+
+# --- minimal background tailer ---
+_tail_thread = None
+_tail_stop = threading.Event()
+_tail_seen = defaultdict(int)  # source -> last line index
+
 from dask import delayed
 from dask.distributed import Client, progress
 
 from .launch_slurm import SCHEDULER_HOST, PORT_SLURM_SCHEDULER
+
+def _tail_logs_loop(client, interval: float, include_scheduler: bool, n_lines: int):
+    sys.stdout.write(f"📜 Tailing Dask logs every {interval:.1f}s\n"); sys.stdout.flush()
+    while not _tail_stop.wait(interval):
+        try:
+            # workers
+            for addr, lines in client.get_worker_logs(n=n_lines).items():
+                key = f"worker::{addr}"
+                start = _tail_seen[key]
+                if start < len(lines):
+                    sys.stdout.write("".join(lines[start:]))
+                    _tail_seen[key] = len(lines)
+            # scheduler
+            if include_scheduler:
+                sch = client.get_scheduler_logs(n=n_lines)
+                key = "scheduler"
+                start = _tail_seen[key]
+                if start < len(sch):
+                    sys.stdout.write("".join(sch[start:]))
+                    _tail_seen[key] = len(sch)
+            sys.stdout.flush()
+        except Exception:
+            # ignore transient failures (worker restarts, etc.)
+            pass
+    sys.stdout.write("📜 Log tailer stopped\n"); sys.stdout.flush()
+
+def _start_log_tailer(client, interval=1.0, include_scheduler=True, n_lines=2000):
+    global _tail_thread
+    if _tail_thread and _tail_thread.is_alive():
+        return
+    _tail_stop.clear()
+    _tail_thread = threading.Thread(
+        target=_tail_logs_loop,
+        args=(client, interval, include_scheduler, n_lines),
+        name="dask-log-tailer",
+        daemon=True,
+    )
+    _tail_thread.start()
+    atexit.register(stop_log_tailing)
+
+def stop_log_tailing():
+    _tail_stop.set()
+    if _tail_thread and _tail_thread.is_alive():
+        _tail_thread.join(timeout=2)
 
 
 SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
@@ -53,14 +103,25 @@ def _connect_to_scheduler() -> Tuple[Client, str]:
     raise RuntimeError("Unable to connect to Dask scheduler") from last_error
 
 
-def get_client() -> Client:
+# --- change: enable tailing by default via get_client() ---
+def get_client(
+    *,
+    tail_logs: bool = True,
+    log_interval: float = 1.0,
+    include_scheduler_logs: bool = True,
+    max_log_lines: int = 2000,
+) -> Client:
     client, _ = _connect_to_scheduler()
-
-    # Print connection info
     print("🚀 Connected to scheduler:", client.scheduler.address)
     print("Client status:", client.status)
+    if tail_logs:
+        _start_log_tailer(
+            client,
+            interval=log_interval,
+            include_scheduler=include_scheduler_logs,
+            n_lines=max_log_lines,
+        )
     return client
-
 
 def close_workers():
     client, address_used = _connect_to_scheduler()
@@ -72,6 +133,9 @@ def close_workers():
 
 
 def main() -> None:
+    import jax, jax.numpy as jnp
+    import numpy as np
+
 
     client = get_client()
 

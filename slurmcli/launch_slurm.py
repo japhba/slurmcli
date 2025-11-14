@@ -34,6 +34,7 @@ import time
 import uuid
 from collections import defaultdict
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # Third-party (kept for parity with original script)
@@ -175,6 +176,111 @@ JUPYTER_PORT = int(CONFIG.get("jupyter_port"))
 VENV_ACTIVATE = CONFIG.get("venv_activate")
 DEFAULT_JUPYTER_RUNTIME_BASE = "/tmp/jrt"
 SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
+
+LAST_LAUNCH_FILE = Path.home() / ".slurmcli_last_launch.json"
+LAUNCH_CONFIG_VERSION = 1
+REQUIRED_LAUNCH_FIELDS = {
+    "walltime",
+    "num_jobs",
+    "processes",
+    "cores_per_process",
+    "threads_per_worker",
+    "memory",
+    "launch_kernels",
+}
+PERSISTED_LAUNCH_FIELDS = [
+    "partition",
+    "walltime",
+    "num_jobs",
+    "processes",
+    "cores_per_process",
+    "threads_per_worker",
+    "memory",
+    "nodelist",
+    "num_gpus",
+    "gres",
+    "launch_kernels",
+]
+
+
+def load_last_launch_config() -> Optional[Dict[str, Any]]:
+    try:
+        raw = LAST_LAUNCH_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        print(f"⚠️ Unable to read last launch configuration ({exc})")
+        return None
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"⚠️ Could not parse {LAST_LAUNCH_FILE}: {exc}")
+        return None
+
+    if not REQUIRED_LAUNCH_FIELDS.issubset(data):
+        return None
+
+    for key in ("num_jobs", "processes", "cores_per_process", "threads_per_worker", "num_gpus"):
+        if key in data and data[key] is not None:
+            try:
+                data[key] = int(data[key])
+            except (TypeError, ValueError):
+                return None
+
+    data["launch_kernels"] = bool(data.get("launch_kernels", False))
+    return data
+
+
+def save_last_launch_config(config: Dict[str, Any]) -> None:
+    payload = {k: config.get(k) for k in PERSISTED_LAUNCH_FIELDS}
+    payload["config_version"] = LAUNCH_CONFIG_VERSION
+    payload["saved_at"] = time.time()
+    try:
+        LAST_LAUNCH_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"⚠️ Unable to write {LAST_LAUNCH_FILE}: {exc}")
+
+
+def format_saved_timestamp(ts: Optional[float]) -> Optional[str]:
+    if not ts:
+        return None
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def print_launch_summary(config: Dict[str, Any], *, title: str = "📋 LAUNCH SUMMARY") -> None:
+    partition_display = config.get("partition") or "SLURM default (no explicit queue)"
+    walltime = config.get("walltime", "unknown")
+    num_jobs = int(config.get("num_jobs") or 0)
+    processes = int(config.get("processes") or 1)
+    cores_per_process = int(config.get("cores_per_process") or 1)
+    threads_per_worker = int(config.get("threads_per_worker") or cores_per_process or 1)
+    total_cores_for_job = threads_per_worker * processes
+    memory = config.get("memory", "n/a")
+    total_workers = num_jobs * processes
+    nodelist = config.get("nodelist") or "Any available"
+    num_gpus = int(config.get("num_gpus") or 0)
+    launch_kernels = bool(config.get("launch_kernels"))
+
+    print("\n" + "=" * 50)
+    print(title)
+    print("=" * 50)
+    print(f"  Partition / Queue: {partition_display}")
+    print(f"  Walltime:          {walltime}")
+    print(f"  SLURM Jobs:        {num_jobs}")
+    print(f"  Processes per job: {processes}")
+    print(f"  Cores per process: {cores_per_process}")
+    print(f"  Threads per process (actual): {threads_per_worker}")
+    print(f"  Total cores per job: {total_cores_for_job}")
+    print(f"  Memory per job:    {memory}")
+    print(f"  Total workers:     {total_workers}")
+    print(f"  Specific node:     {nodelist}")
+    print(f"  GPUs per process:  {num_gpus}")
+    print(f"  Launch kernels:    {'Yes' if launch_kernels else 'No'}")
+    print("=" * 50)
 
 
 # --- Helper parsers for CLI output -------------------------------------------
@@ -972,6 +1078,144 @@ def stop_jupyter_server_on_worker(pid: int, sig: int = signal.SIGTERM, wait: flo
     return {"status": "signaled", "pid": pid}
 
 
+def execute_launch(config: Dict[str, Any], verbosity: int, require_confirmation: bool = True) -> None:
+    launch_cfg = dict(config)
+
+    num_jobs = max(1, int(launch_cfg.get("num_jobs") or 1))
+    processes = max(1, int(launch_cfg.get("processes") or 1))
+    cores_per_process = max(1, int(launch_cfg.get("cores_per_process") or 1))
+    threads_per_worker = int(launch_cfg.get("threads_per_worker") or cores_per_process or 1)
+    threads_per_worker = max(1, threads_per_worker)
+    walltime = launch_cfg.get("walltime") or WALLTIME
+    memory = launch_cfg.get("memory") or f"{MEMORY_GB_DEFAULT}GB"
+    selected_partition = launch_cfg.get("partition")
+    nodelist = launch_cfg.get("nodelist") or None
+    num_gpus = int(launch_cfg.get("num_gpus") or 0)
+    gres = launch_cfg.get("gres")
+    if not gres and num_gpus > 0:
+        gres = f"gpu:{num_gpus}"
+    launch_kernels = bool(launch_cfg.get("launch_kernels"))
+
+    launch_cfg.update(
+        {
+            "num_jobs": num_jobs,
+            "processes": processes,
+            "cores_per_process": cores_per_process,
+            "threads_per_worker": threads_per_worker,
+            "walltime": walltime,
+            "memory": memory,
+            "partition": selected_partition,
+            "nodelist": nodelist,
+            "num_gpus": num_gpus,
+            "gres": gres,
+            "launch_kernels": launch_kernels,
+        }
+    )
+
+    print_launch_summary(launch_cfg)
+    if require_confirmation:
+        if input("Proceed with launch? (y/n): ").lower() != 'y':
+            print("🚫 Launch aborted.")
+            return
+
+    save_last_launch_config(launch_cfg)
+
+    cluster = client = None
+    started_jupyter_servers: List[Dict[str, Any]] = []
+    try:
+        cluster, client = get_cluster(
+            local=False,
+            queue=selected_partition,
+            num_jobs=num_jobs,
+            processes=processes,
+            threads_per_worker=threads_per_worker,
+            cores=cores_per_process,
+            memory=memory,
+            walltime=walltime,
+            nodelist=nodelist,
+            gres=gres,
+            verbose=verbosity,
+        )
+        print("\n✅ Dask cluster is running!")
+        print(f"   Reconnect with: Client('{client.scheduler.address}')")
+        try:
+            SCHEDULER_ADDRESS_FILE.write_text(client.scheduler.address)
+            print(f"   Scheduler address saved to {SCHEDULER_ADDRESS_FILE}")
+        except Exception:
+            pass
+
+        if launch_kernels:
+            print("\n🔌 Starting a Jupyter server on each worker via Dask…")
+            worker_infos = client.scheduler_info().get("workers", {})
+            worker_addresses = list(worker_infos.keys())
+            if not worker_addresses:
+                print("⚠️  No workers available to launch Jupyter kernels.")
+            else:
+                session_tag = uuid.uuid4().hex[:8]
+                for idx, worker_addr in enumerate(worker_addresses):
+                    worker_port = JUPYTER_PORT + idx if JUPYTER_PORT is not None else None
+                    runtime_base = os.path.join(DEFAULT_JUPYTER_RUNTIME_BASE, f"session-{session_tag}", f"worker-{idx}")
+                    future = client.submit(
+                        start_jupyter_server_on_worker,
+                        port=worker_port,
+                        runtime_dir_base=runtime_base,
+                        timeout=60.0,
+                        pure=False,
+                        workers=[worker_addr],
+                        allow_other_workers=False,
+                    )
+                    try:
+                        info = future.result(timeout=180)
+                    except Exception as exc:
+                        print(f"❌ Worker {worker_addr}: exception while starting Jupyter -> {exc}")
+                        continue
+
+                    if info.get("status") == "ok" and info.get("url"):
+                        host_display = info.get("host") or worker_addr
+                        print(f"✅ Worker {worker_addr} ({host_display})")
+                        print(f"   PID: {info.get('pid')} | URL: {info.get('url')}")
+                        started_jupyter_servers.append({"worker": worker_addr, "pid": info.get("pid")})
+                    else:
+                        print(f"❌ Worker {worker_addr}: {info.get('error', 'failed to start Jupyter')}")
+                        log_tail = info.get("log_tail") or []
+                        if log_tail:
+                            print("   Log tail:")
+                            for line in log_tail[-10:]:
+                                print(f"   {line}")
+
+        while True:
+            time.sleep(3600)
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Interrupt received. Shutting down…")
+    except Exception as e:
+        print(f"\n💥 Error during cluster setup: {e}")
+    finally:
+        print("\n🛑 Shutting down cluster and client…")
+        if client and started_jupyter_servers:
+            print("🧹 Stopping remote Jupyter servers…")
+            for entry in started_jupyter_servers:
+                worker, pid = entry.get("worker"), entry.get("pid")
+                try:
+                    fut = client.submit(stop_jupyter_server_on_worker, pid, pure=False, workers=[worker], allow_other_workers=False)
+                    res = fut.result(timeout=15)
+                    status = res.get("status")
+                except Exception as exc:
+                    status = f"error: {exc}"
+                print(f"   Worker {worker or 'unknown'} pid {pid}: {status}")
+        if client:
+            try:
+                client.close()
+            except Exception:
+                pass
+        if cluster:
+            try:
+                cluster.close()
+            except Exception:
+                pass
+        print("✅ Cleanup complete.")
+
+
 # --- Interactive UI -----------------------------------------------------------
 
 def prompt_for_value(prompt_text: str, default: Any, type_converter=str):
@@ -987,6 +1231,19 @@ def main_interactive(verbosity: int) -> None:
     show_admin = verbosity >= 2
     include_jobs = verbosity >= 2
     include_job_resources = verbosity >= 4
+
+    last_launch_config = load_last_launch_config()
+    if last_launch_config:
+        saved_at = format_saved_timestamp(last_launch_config.get("saved_at"))
+        print("\n🕘 Previous launch configuration detected.")
+        if saved_at:
+            print(f"   Saved at: {saved_at}")
+        print_launch_summary(last_launch_config, title="📁 LAST CONFIGURATION")
+        reuse = input("↩️  Re-launch the previous configuration? (y/n): ").strip().lower()
+        if reuse == 'y':
+            print("\n🔁 Re-launching previous configuration…")
+            execute_launch(last_launch_config, verbosity, require_confirmation=False)
+            return
 
     parts = get_partitions(show_all=show_admin)
     if not parts:
@@ -1253,124 +1510,20 @@ def main_interactive(verbosity: int) -> None:
     num_gpus = prompt_for_value("Enter number of GPUs per process (0 for CPU-only)", 0, int)
     gres = f"gpu:{num_gpus}" if num_gpus > 0 else None
 
-    # 4) Summary
-    print("\n" + "=" * 50)
-    print("📋 LAUNCH SUMMARY")
-    print("=" * 50)
-    partition_display = selected_partition or "SLURM default (no explicit queue)"
-    print(f"  Partition / Queue: {partition_display}")
-    print(f"  Walltime:          {walltime}")
-    print(f"  SLURM Jobs:        {num_jobs}")
-    print(f"  Processes per job: {processes}")
-    print(f"  Cores per process: {cores_per_process}")
-    print(f"  Threads per process (actual): {threads_per_worker}")
-    print(f"  Total cores per job: {total_cores_for_job}")
-    print(f"  Memory per job:    {memory}")
-    print(f"  Total workers:     {num_jobs * processes}")
-    print(f"  Specific node:     {nodelist or 'Any available'}")
-    print(f"  GPUs per process:  {num_gpus}")
-    print(f"  Launch kernels:    {'Yes' if launch_kernels else 'No'}")
-    print("=" * 50)
-
-    if input("Proceed with launch? (y/n): ").lower() != 'y':
-        print("🚫 Launch aborted.")
-        return
-
-    # 5) Launch Cluster
-    cluster = client = None
-    started_jupyter_servers: List[Dict[str, Any]] = []
-    try:
-        cluster, client = get_cluster(
-            local=False,
-            queue=selected_partition,
-            num_jobs=num_jobs,
-            processes=processes,
-            threads_per_worker=threads_per_worker,
-            cores=cores_per_process,
-            memory=memory,
-            walltime=walltime,
-            nodelist=nodelist,
-            gres=gres,
-            verbose=verbosity,
-        )
-        print("\n✅ Dask cluster is running!")
-        print(f"   Reconnect with: Client('{client.scheduler.address}')")
-        try:
-            SCHEDULER_ADDRESS_FILE.write_text(client.scheduler.address)
-            print(f"   Scheduler address saved to {SCHEDULER_ADDRESS_FILE}")
-        except Exception:
-            pass
-
-        if launch_kernels:
-            print("\n🔌 Starting a Jupyter server on each worker via Dask…")
-            worker_infos = client.scheduler_info().get("workers", {})
-            worker_addresses = list(worker_infos.keys())
-            if not worker_addresses:
-                print("⚠️  No workers available to launch Jupyter kernels.")
-            else:
-                session_tag = uuid.uuid4().hex[:8]
-                for idx, worker_addr in enumerate(worker_addresses):
-                    worker_port = JUPYTER_PORT + idx if JUPYTER_PORT is not None else None
-                    runtime_base = os.path.join(DEFAULT_JUPYTER_RUNTIME_BASE, f"session-{session_tag}", f"worker-{idx}")
-                    future = client.submit(
-                        start_jupyter_server_on_worker,
-                        port=worker_port,
-                        runtime_dir_base=runtime_base,
-                        timeout=60.0,
-                        pure=False,
-                        workers=[worker_addr],
-                        allow_other_workers=False,
-                    )
-                    try:
-                        info = future.result(timeout=180)
-                    except Exception as exc:
-                        print(f"❌ Worker {worker_addr}: exception while starting Jupyter -> {exc}")
-                        continue
-
-                    if info.get("status") == "ok" and info.get("url"):
-                        host_display = info.get("host") or worker_addr
-                        print(f"✅ Worker {worker_addr} ({host_display})")
-                        print(f"   PID: {info.get('pid')} | URL: {info.get('url')}")
-                        started_jupyter_servers.append({"worker": worker_addr, "pid": info.get("pid")})
-                    else:
-                        print(f"❌ Worker {worker_addr}: {info.get('error', 'failed to start Jupyter')}")
-                        log_tail = info.get("log_tail") or []
-                        if log_tail:
-                            print("   Log tail:")
-                            for line in log_tail[-10:]:
-                                print(f"   {line}")
-
-        while True:
-            time.sleep(3600)
-
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Interrupt received. Shutting down…")
-    except Exception as e:
-        print(f"\n💥 Error during cluster setup: {e}")
-    finally:
-        print("\n🛑 Shutting down cluster and client…")
-        if client and started_jupyter_servers:
-            print("🧹 Stopping remote Jupyter servers…")
-            for entry in started_jupyter_servers:
-                worker, pid = entry.get("worker"), entry.get("pid")
-                try:
-                    fut = client.submit(stop_jupyter_server_on_worker, pid, pure=False, workers=[worker], allow_other_workers=False)
-                    res = fut.result(timeout=15)
-                    status = res.get("status")
-                except Exception as exc:
-                    status = f"error: {exc}"
-                print(f"   Worker {worker or 'unknown'} pid {pid}: {status}")
-        if client:
-            try:
-                client.close()
-            except Exception:
-                pass
-        if cluster:
-            try:
-                cluster.close()
-            except Exception:
-                pass
-        print("✅ Cleanup complete.")
+    launch_config = {
+        "partition": selected_partition,
+        "walltime": walltime,
+        "num_jobs": num_jobs,
+        "processes": processes,
+        "cores_per_process": cores_per_process,
+        "threads_per_worker": threads_per_worker,
+        "memory": memory,
+        "nodelist": nodelist,
+        "num_gpus": num_gpus,
+        "gres": gres,
+        "launch_kernels": launch_kernels,
+    }
+    execute_launch(launch_config, verbosity)
 
 
 # --- CLI ---------------------------------------------------------------------

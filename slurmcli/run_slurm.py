@@ -1,27 +1,93 @@
+import atexit
+import logging
+import os
+import sys
+import threading
 import time
+from collections import defaultdict
 from functools import partial
 from pathlib import Path
-from typing import Optional, Tuple
+import weakref
+from typing import Any, Optional, Tuple, Union
+import signal
 
-import sys, threading, atexit
-from collections import defaultdict
+from dask import delayed
+from dask.distributed import Client, progress
+
+from .launch_slurm import (
+    CORES,
+    MEMORY_GB_DEFAULT,
+    NUM_JOBS,
+    PORT_SLURM_SCHEDULER,
+    PROCESSES_PER_WORKER,
+    SCHEDULER_HOST,
+    VENV_ACTIVATE,
+    WALLTIME,
+    get_cluster,
+)
+
+logger = logging.getLogger("slurmcli.run_slurm")
+_ACTIVE_CLIENT: Optional[Client] = None
+_ACTIVE_CLUSTER: Any = None
+_SIGNALS_INSTALLED = False
 
 # --- minimal background tailer ---
 _tail_thread = None
 _tail_stop = threading.Event()
 _tail_seen = defaultdict(int)  # source -> last line index
 
-from dask import delayed
-from dask.distributed import Client, progress
+def _normalize_log_lines(raw) -> list[str]:
+    lines: list[str] = []
+    def _add_line(text: str) -> None:
+        lines.append(text if text.endswith("\n") else text + "\n")
 
-from .launch_slurm import SCHEDULER_HOST, PORT_SLURM_SCHEDULER
+    if isinstance(raw, dict):
+        # flatten nanny/worker log buckets
+        items = []
+        for key, val in raw.items():
+            items.append((key, val))
+        raw_iter = items
+    else:
+        raw_iter = raw or []
+
+    for entry in raw_iter:
+        if isinstance(entry, tuple) and len(entry) == 2 and isinstance(entry[1], (list, tuple, dict)):
+            # e.g. ("worker", [...]) or ("nanny", {...})
+            prefix, payload = entry
+            nested = payload
+            if isinstance(nested, dict):
+                for sub_key, sub_val in nested.items():
+                    sub_lines = _normalize_log_lines(sub_val)
+                    for line in sub_lines:
+                        _add_line(f"[{prefix}/{sub_key}] {line.rstrip()}")
+            else:
+                sub_lines = _normalize_log_lines(nested)
+                for line in sub_lines:
+                    _add_line(f"[{prefix}] {line.rstrip()}")
+            continue
+
+        if isinstance(entry, str):
+            _add_line(entry)
+        elif isinstance(entry, bytes):
+            _add_line(entry.decode(errors="replace"))
+        elif isinstance(entry, tuple) and len(entry) >= 2:
+            prefix = entry[0]
+            payload = entry[1] if entry[1] is not None else ""
+            if isinstance(payload, bytes):
+                payload = payload.decode(errors="replace")
+            _add_line(f"[{prefix}] {payload}")
+        else:
+            _add_line(str(entry))
+    return lines
+
 
 def _tail_logs_loop(client, interval: float, include_scheduler: bool, n_lines: int):
     sys.stdout.write(f"📜 Tailing Dask logs every {interval:.1f}s\n"); sys.stdout.flush()
     while not _tail_stop.wait(interval):
         try:
             # workers
-            for addr, lines in client.get_worker_logs(n=n_lines).items():
+            for addr, raw_lines in client.get_worker_logs(n=n_lines, nanny=True).items():
+                lines = _normalize_log_lines(raw_lines)
                 key = f"worker::{addr}"
                 start = _tail_seen[key]
                 if start < len(lines):
@@ -29,16 +95,15 @@ def _tail_logs_loop(client, interval: float, include_scheduler: bool, n_lines: i
                     _tail_seen[key] = len(lines)
             # scheduler
             if include_scheduler:
-                sch = client.get_scheduler_logs(n=n_lines)
+                sch = _normalize_log_lines(client.get_scheduler_logs(n=n_lines))
                 key = "scheduler"
                 start = _tail_seen[key]
                 if start < len(sch):
                     sys.stdout.write("".join(sch[start:]))
                     _tail_seen[key] = len(sch)
             sys.stdout.flush()
-        except Exception:
-            # ignore transient failures (worker restarts, etc.)
-            pass
+        except Exception as exc:
+            logger.debug("Log tailing iteration failed: %s", exc, exc_info=False)
     sys.stdout.write("📜 Log tailer stopped\n"); sys.stdout.flush()
 
 def _start_log_tailer(client, interval=1.0, include_scheduler=True, n_lines=2000):
@@ -63,6 +128,7 @@ def stop_log_tailing():
 
 SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
 DEFAULT_SCHEDULER_ADDRESS = f"tcp://{SCHEDULER_HOST}:{PORT_SLURM_SCHEDULER}"
+DEFAULT_MEMORY = f"{MEMORY_GB_DEFAULT}GB"
 
 
 def _load_saved_scheduler_address() -> Optional[str]:
@@ -95,6 +161,10 @@ def _connect_to_scheduler() -> Tuple[Client, str]:
                 print(f"ℹ️ Using scheduler address from {SCHEDULER_ADDRESS_FILE}: {address}")
             else:
                 print(f"ℹ️ Using configured scheduler address: {address}")
+            try:
+                SCHEDULER_ADDRESS_FILE.write_text(client.scheduler.address)
+            except Exception:
+                pass
             return client, address
         except Exception as exc:
             print(f"⚠️ Failed to connect to scheduler via {source} address ({address}): {exc}")
@@ -103,17 +173,250 @@ def _connect_to_scheduler() -> Tuple[Client, str]:
     raise RuntimeError("Unable to connect to Dask scheduler") from last_error
 
 
-# --- change: enable tailing by default via get_client() ---
+def _register_cluster_cleanup(client: Client, cluster: Any) -> None:
+    global _ACTIVE_CLIENT, _ACTIVE_CLUSTER, _SIGNALS_INSTALLED
+    _ACTIVE_CLIENT = client
+    _ACTIVE_CLUSTER = cluster
+
+    def _cleanup():
+        stop_log_tailing()
+        try:
+            client.close()
+        except Exception:
+            pass
+        try:
+            if cluster is not None:
+                cluster.close()
+        except Exception:
+            pass
+
+    atexit.register(_cleanup)
+    weakref.finalize(client, _cleanup)
+    if not _SIGNALS_INSTALLED:
+        try:
+            def handler(signum, frame):
+                _cleanup()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    signal.signal(sig, handler)
+                except Exception:
+                    pass
+            _SIGNALS_INSTALLED = True
+        except Exception:
+            pass
+
+
+def _dashboard_url(client: Client, cluster: Any) -> Optional[str]:
+    """Best-effort dashboard URL for logging."""
+    if cluster is not None:
+        link = getattr(cluster, "dashboard_link", None)
+        if link:
+            return str(link)
+    try:
+        info = client.scheduler_info()
+        services = info.get("services", {}) if isinstance(info, dict) else {}
+        dash_port = services.get("dashboard") or services.get("bokeh")
+        if dash_port:
+            host = client.scheduler.address.split("://")[-1].split(":")[0]
+            return f"http://{host}:{dash_port}"
+    except Exception:
+        return None
+    return None
+
+
+def _wait_for_workers(client: Client, attempts: int, delay: float) -> bool:
+    """Return True if any workers appear within the probe window."""
+    for i in range(max(1, attempts)):
+        try:
+            workers = client.scheduler_info().get("workers", {})
+            if workers:
+                return True
+        except Exception as exc:
+            logger.debug("Worker probe %d failed: %s", i + 1, exc, exc_info=False)
+        time.sleep(delay)
+    return False
+
+
+def _infer_cluster_type(
+    *,
+    local: bool,
+    partition: Optional[str],
+    gres: Optional[str],
+    num_gpus: int,
+) -> str:
+    if local:
+        return "local"
+    text = " ".join([partition or "", gres or ""]).lower()
+    if "gpu" in text or num_gpus > 0:
+        return "gpu"
+    return "cpu"
+
+
+def _cluster_type_from_workers(workers: dict) -> Optional[str]:
+    if not workers:
+        return None
+    any_gpu = False
+    hosts: set[str] = set()
+    for addr, meta in workers.items():
+        resources = meta.get("resources", {}) or {}
+        for key, val in resources.items():
+            if "gpu" in str(key).lower() and float(val or 0) > 0:
+                any_gpu = True
+                break
+        host = addr.split("://")[-1].split(":")[0]
+        hosts.add(host)
+    if any_gpu:
+        return "gpu"
+    local_hosts = {"127.0.0.1", "localhost"}
+    if hosts and hosts.issubset(local_hosts):
+        return "local"
+    return "cpu"
+
+
 def get_client(
     *,
+    local: bool = False,
+    partition: Optional[str] = None,
+    walltime: Optional[str] = None,
+    num_jobs: Optional[int] = None,
+    processes: Optional[int] = None,
+    cores_per_process: Optional[int] = None,
+    threads_per_worker: Optional[int] = None,
+    memory: Optional[str] = None,
+    nodelist: Optional[str] = None,
+    num_gpus: int = 0,
+    gres: Optional[str] = None,
+    account: str = "gcnu-ac",
+    job_name: str = "tfl",
+    log_dir: str = "dask_logs",
+    venv_activate: Optional[str] = VENV_ACTIVATE,
+    verbose: int = 0,
     tail_logs: bool = True,
     log_interval: float = 1.0,
     include_scheduler_logs: bool = True,
     max_log_lines: int = 2000,
-) -> Client:
-    client, _ = _connect_to_scheduler()
-    print("🚀 Connected to scheduler:", client.scheduler.address)
-    print("Client status:", client.status)
+    shutdown_on_exit: bool = True,
+    return_cluster: bool = False,
+    worker_probe_attempts: int = 3,
+    worker_probe_delay: float = 2.0,
+    ensure_gc_cleanup: bool = True,
+    launch_if_no_workers: bool = True,
+    cluster_type: Optional[str] = None,
+) -> Union[Client, Tuple[Client, Any]]:
+    """Connect to an existing scheduler or launch one if none is reachable.
+
+    The SLURM arguments mirror the interactive CLI: partition, walltime,
+    num_jobs, processes, cores_per_process / threads_per_worker, memory,
+    nodelist, num_gpus/gres, account, job_name, log_dir, and worker venv
+    activation. The function reuses any reachable scheduler first. By default it
+    will auto-launch if a scheduler exists but has zero workers (set
+    `launch_if_no_workers=False` to skip). Use `local=True` to prefer a
+    LocalCluster. `shutdown_on_exit` now defaults to True so clusters are torn
+    down on kernel restart; disable if you want them to live beyond the calling
+    process. Set `cluster_type` to `local`, `gpu`, or `cpu` to only reuse
+    clusters whose workers match that type (default inferred from args).
+    """
+    cluster = None
+    client = None
+    need_launch = False
+    target_type = (cluster_type or _infer_cluster_type(local=local, partition=partition, gres=gres, num_gpus=int(num_gpus or 0))).lower()
+
+    # Try to reuse an existing scheduler first
+    try:
+        client, addr = _connect_to_scheduler()
+        has_workers = _wait_for_workers(client, worker_probe_attempts, worker_probe_delay)
+        n_workers = len(client.scheduler_info().get("workers", {}))
+        existing_type = _cluster_type_from_workers(client.scheduler_info().get("workers", {}))
+        type_matches = (existing_type == target_type) if existing_type else False
+
+        if has_workers and type_matches:
+            logger.info(
+                "Reusing existing scheduler at %s with %d %s worker(s)",
+                addr,
+                n_workers,
+                target_type,
+            )
+        elif has_workers and not type_matches:
+            logger.info(
+                "Existing scheduler at %s has %d worker(s) of type %s; expected %s. Launching a new %s cluster.",
+                addr,
+                n_workers,
+                existing_type or "unknown",
+                target_type,
+                "local" if local else "SLURM",
+            )
+            try:
+                client.close()
+            except Exception:
+                pass
+            client = None
+            need_launch = True
+        elif not has_workers and launch_if_no_workers:
+            logger.info(
+                "Existing scheduler at %s has no workers after %d probe(s); launching a %s cluster.",
+                addr,
+                worker_probe_attempts,
+                "local" if local else "SLURM",
+            )
+            try:
+                client.close()
+            except Exception:
+                pass
+            client = None
+            need_launch = True
+        else:
+            logger.info(
+                "Existing scheduler at %s has no workers (target type %s). Not launching because launch_if_no_workers=False.",
+                addr,
+                target_type,
+            )
+    except Exception as exc:
+        logger.info("No existing scheduler reachable (%s); launching a %s cluster.", type(exc).__name__, "local" if local else "SLURM")
+        need_launch = True
+
+    if need_launch:
+        jobs = int(num_jobs or NUM_JOBS)
+        proc = int(processes or PROCESSES_PER_WORKER)
+        cores = int(cores_per_process or CORES)
+        threads = int(threads_per_worker or cores)
+        mem = memory or DEFAULT_MEMORY
+        wall = walltime or WALLTIME
+        effective_gres = gres
+        if not effective_gres and num_gpus:
+            effective_gres = f"gpu:{int(num_gpus)}"
+
+        cluster, client = get_cluster(
+            local=local,
+            queue=partition,
+            account=account,
+            num_jobs=jobs,
+            processes=proc,
+            threads_per_worker=threads,
+            cores=cores,
+            memory=mem,
+            walltime=wall,
+            log_dir=log_dir,
+            job_name=job_name,
+            venv_activate=venv_activate,
+            nodelist=nodelist,
+            gres=effective_gres,
+            verbose=verbose,
+        )
+        try:
+            SCHEDULER_ADDRESS_FILE.write_text(client.scheduler.address)
+            logger.info("Scheduler address saved to %s", SCHEDULER_ADDRESS_FILE)
+        except Exception:
+            pass
+        if shutdown_on_exit:
+            _register_cluster_cleanup(client, cluster)
+        elif ensure_gc_cleanup:
+            weakref.finalize(client, client.close)
+            if cluster is not None:
+                weakref.finalize(cluster, cluster.close)
+    else:
+        print("🚀 Connected to scheduler:", client.scheduler.address)
+        print("Client status:", client.status)
+
     if tail_logs:
         _start_log_tailer(
             client,
@@ -121,6 +424,13 @@ def get_client(
             include_scheduler=include_scheduler_logs,
             n_lines=max_log_lines,
         )
+
+    dash = _dashboard_url(client, cluster)
+    if dash:
+        logger.info("Dashboard: %s", dash)
+
+    if return_cluster:
+        return client, cluster
     return client
 
 def close_workers():

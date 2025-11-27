@@ -178,6 +178,7 @@ DEFAULT_JUPYTER_RUNTIME_BASE = "/tmp/jrt"
 SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
 
 LAST_LAUNCH_FILE = Path.home() / ".slurmcli_last_launch.json"
+SAVED_CONFIGS_FILE = Path.home() / ".slurmcli_saved_configs.json"
 LAUNCH_CONFIG_VERSION = 1
 REQUIRED_LAUNCH_FIELDS = {
     "walltime",
@@ -203,6 +204,20 @@ PERSISTED_LAUNCH_FIELDS = [
 ]
 
 
+def _normalize_launch_config(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not REQUIRED_LAUNCH_FIELDS.issubset(data):
+        return None
+    normalized = dict(data)
+    for key in ("num_jobs", "processes", "cores_per_process", "threads_per_worker", "num_gpus"):
+        if normalized.get(key) is not None:
+            try:
+                normalized[key] = int(normalized[key])
+            except (TypeError, ValueError):
+                return None
+    normalized["launch_kernels"] = bool(normalized.get("launch_kernels", False))
+    return normalized
+
+
 def load_last_launch_config() -> Optional[Dict[str, Any]]:
     try:
         raw = LAST_LAUNCH_FILE.read_text(encoding="utf-8")
@@ -218,18 +233,7 @@ def load_last_launch_config() -> Optional[Dict[str, Any]]:
         print(f"⚠️ Could not parse {LAST_LAUNCH_FILE}: {exc}")
         return None
 
-    if not REQUIRED_LAUNCH_FIELDS.issubset(data):
-        return None
-
-    for key in ("num_jobs", "processes", "cores_per_process", "threads_per_worker", "num_gpus"):
-        if key in data and data[key] is not None:
-            try:
-                data[key] = int(data[key])
-            except (TypeError, ValueError):
-                return None
-
-    data["launch_kernels"] = bool(data.get("launch_kernels", False))
-    return data
+    return _normalize_launch_config(data)
 
 
 def save_last_launch_config(config: Dict[str, Any]) -> None:
@@ -240,6 +244,48 @@ def save_last_launch_config(config: Dict[str, Any]) -> None:
         LAST_LAUNCH_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError as exc:
         print(f"⚠️ Unable to write {LAST_LAUNCH_FILE}: {exc}")
+
+
+def _load_named_configs_raw() -> Dict[str, Any]:
+    try:
+        raw = SAVED_CONFIGS_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        print(f"⚠️ Unable to read {SAVED_CONFIGS_FILE}: {exc}")
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError as exc:
+        print(f"⚠️ Could not parse {SAVED_CONFIGS_FILE}: {exc}")
+        return {}
+
+
+def load_named_launch_config(name: str) -> Optional[Dict[str, Any]]:
+    configs = _load_named_configs_raw()
+    cfg = configs.get(name)
+    if not cfg:
+        return None
+    normalized = _normalize_launch_config(cfg)
+    if normalized is None:
+        return None
+    normalized["saved_at"] = cfg.get("saved_at")
+    normalized["__config_name__"] = name
+    return normalized
+
+
+def save_named_launch_config(name: str, config: Dict[str, Any]) -> None:
+    payload = {k: config.get(k) for k in PERSISTED_LAUNCH_FIELDS}
+    payload["config_version"] = LAUNCH_CONFIG_VERSION
+    payload["saved_at"] = time.time()
+    configs = _load_named_configs_raw()
+    configs[name] = payload
+    try:
+        SAVED_CONFIGS_FILE.write_text(json.dumps(configs, indent=2), encoding="utf-8")
+        print(f"💾 Saved configuration as '{name}'")
+    except OSError as exc:
+        print(f"⚠️ Unable to write {SAVED_CONFIGS_FILE}: {exc}")
 
 
 def format_saved_timestamp(ts: Optional[float]) -> Optional[str]:
@@ -281,6 +327,27 @@ def print_launch_summary(config: Dict[str, Any], *, title: str = "📋 LAUNCH SU
     print(f"  GPUs per process:  {num_gpus}")
     print(f"  Launch kernels:    {'Yes' if launch_kernels else 'No'}")
     print("=" * 50)
+
+
+def _timed_input(prompt: str, timeout: float = 5.0) -> str:
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    except Exception:
+        ready = []
+    if ready:
+        line = sys.stdin.readline()
+        return line.strip()
+    sys.stdout.write("\n")
+    return ""
+
+
+def maybe_save_named_config(config: Dict[str, Any]) -> None:
+    print("\n💾 Save this configuration for later? (type a name within 5s, or press Enter to skip)")
+    name = _timed_input("   Name: ")
+    if name:
+        save_named_launch_config(name, config)
 
 
 # --- Helper parsers for CLI output -------------------------------------------
@@ -1078,7 +1145,13 @@ def stop_jupyter_server_on_worker(pid: int, sig: int = signal.SIGTERM, wait: flo
     return {"status": "signaled", "pid": pid}
 
 
-def execute_launch(config: Dict[str, Any], verbosity: int, require_confirmation: bool = True) -> None:
+def execute_launch(
+    config: Dict[str, Any],
+    verbosity: int,
+    *,
+    require_confirmation: bool = True,
+    prompt_to_save: bool = False,
+) -> None:
     launch_cfg = dict(config)
 
     num_jobs = max(1, int(launch_cfg.get("num_jobs") or 1))
@@ -1117,6 +1190,9 @@ def execute_launch(config: Dict[str, Any], verbosity: int, require_confirmation:
         if input("Proceed with launch? (y/n): ").lower() != 'y':
             print("🚫 Launch aborted.")
             return
+
+    if prompt_to_save:
+        maybe_save_named_config(launch_cfg)
 
     save_last_launch_config(launch_cfg)
 
@@ -1523,7 +1599,7 @@ def main_interactive(verbosity: int) -> None:
         "gres": gres,
         "launch_kernels": launch_kernels,
     }
-    execute_launch(launch_config, verbosity)
+    execute_launch(launch_config, verbosity, prompt_to_save=True)
 
 
 # --- CLI ---------------------------------------------------------------------
@@ -1532,6 +1608,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Interactive Dask-on-Slurm launcher (CLI-based Slurm introspection)")
     p.add_argument("--local", action="store_true", help="Launch a local Dask cluster instead of Slurm")
     p.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (-v, -vv, -vvv, -vvvv)")
+    p.add_argument("config_name", nargs="?", help="Optional saved configuration name to launch directly")
     return p.parse_args(argv)
 
 
@@ -1545,6 +1622,15 @@ def main_cli() -> None:
                 time.sleep(3600)
         except KeyboardInterrupt:
             print("\nStopping…")
+        return
+
+    if args.config_name:
+        config = load_named_launch_config(args.config_name)
+        if not config:
+            print(f"❌ Saved configuration '{args.config_name}' not found or invalid.")
+            return
+        print(f"📂 Launching saved configuration '{args.config_name}'")
+        execute_launch(config, args.verbose, require_confirmation=False)
         return
 
     main_interactive(args.verbose)

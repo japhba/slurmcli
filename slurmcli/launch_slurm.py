@@ -42,6 +42,7 @@ import numpy as np  # noqa: F401
 import jax, jax.numpy as jnp  # noqa: F401
 from dask import delayed  # noqa: F401
 from dask.distributed import Client, LocalCluster
+from distributed.utils import is_kernel
 from dask_jobqueue import SLURMCluster
 
 # --- Optional color output ----------------------------------------------------
@@ -881,6 +882,7 @@ def get_cluster(
     nodelist: Optional[str] = None,
     gres: Optional[str] = None,
     verbose: int = 0,
+    local_processes: Optional[bool] = None,
 ):
     if threads_per_worker is None:
         threads_per_worker = cores
@@ -904,11 +906,15 @@ def get_cluster(
     if local:
         print("🚀 Starting a local Dask cluster…")
         n_workers_local = num_jobs * processes
+        if local_processes is None:
+            use_processes = not is_kernel()
+        else:
+            use_processes = bool(local_processes)
         cluster = LocalCluster(
             n_workers=n_workers_local,
             threads_per_worker=threads_per_worker,
             memory_limit=memory,
-            processes=True,
+            processes=use_processes,
             scheduler_port=scheduler_port if scheduler_port is not None else 0,
             dashboard_address=dashboard_address,
         )
@@ -955,7 +961,10 @@ def get_cluster(
     print("Cluster dashboard:", getattr(cluster, "dashboard_link", "n/a"))
     print("Scheduler address:", client.scheduler.address)
     print(f"\n⏳ Waiting for {total_workers_expected} workers to connect…")
-    client.wait_for_workers(n_workers=total_workers_expected, timeout=300)
+    try:
+        client.wait_for_workers(n_workers=total_workers_expected, timeout=300)
+    except Exception as exc:
+        print(f"⚠️ Timed out waiting for {total_workers_expected} workers ({type(exc).__name__}: {exc})")
 
     sched_info = client.scheduler_info()
     workers = sched_info.get("workers", {})
@@ -964,6 +973,8 @@ def get_cluster(
     total_mem_bytes = sum(w.get("memory_limit", 0) for w in workers.values())
     total_mem_gb = total_mem_bytes / (1024 ** 3) if total_mem_bytes else 0.0
     print(f"\n✅ Workers connected: {n_workers}")
+    if n_workers < total_workers_expected:
+        print(f"⚠️ Requested {total_workers_expected} worker(s), but only {n_workers} connected.")
     print(f"   Summary: {n_workers} worker(s) — total cores={total_cores}, total mem≈{total_mem_gb:.2f}GB\n")
 
     if verbose > 0:

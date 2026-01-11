@@ -16,6 +16,7 @@ dependencies = [
   "dask-jobqueue",
   "numpy",
   "colorama",
+  "tqdm",
 ]
 
 [project.optional-dependencies]

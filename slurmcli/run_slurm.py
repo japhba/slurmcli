@@ -597,6 +597,7 @@ def vmap(
     *,
     axis_name: Optional[str] = None,
     axis_size: Optional[int] = None,
+    sequential: bool = False,
     client: Optional[Client] = None,
     show_progress: bool = True,
     progress_mode: str = "tqdm",
@@ -611,12 +612,18 @@ def vmap(
     Only axis=0 is supported for now. Returns the gathered results (stacked).
     If cache_check="auto" (default), vmap uses joblib-style cache checks when
     the function exposes check_call_in_cache; when all calls return True, vmap
-    runs locally instead of launching Dask jobs.
+    runs locally instead of launching Dask jobs. Use sequential=True to force
+    a local for-loop (requires local=True).
     """
     if axis_name is not None:
         raise NotImplementedError("axis_name is not supported by slurmcli.vmap")
     if axis_size is not None:
         raise NotImplementedError("axis_size is not supported by slurmcli.vmap")
+    if sequential:
+        if client is not None:
+            raise ValueError("slurmcli.vmap(sequential=True) requires local=True and no active client.")
+        if not client_kwargs.get("local", False):
+            raise ValueError("slurmcli.vmap(sequential=True) requires local=True.")
 
     def _mapped(*args: Any):
         if not args:
@@ -631,7 +638,7 @@ def vmap(
             if other != size:
                 raise ValueError(f"vmap arguments have mismatched axis sizes: {inferred}")
 
-        use_local = False
+        use_local = sequential
         cache_probe = None
         if cache_check in ("auto", True):
             cache_probe = getattr(fun, "check_call_in_cache", None)
@@ -639,7 +646,7 @@ def vmap(
             cache_probe = cache_check
 
 
-        if cache_probe is not None:
+        if not use_local and cache_probe is not None:
             try:
                 all_cached = True
                 for i in range(size):
@@ -653,13 +660,17 @@ def vmap(
 
         if use_local:
             t0 = time.time()
-            iterator = range(size)
             if show_progress:
+                mode = (progress_mode or "tqdm").lower()
+                if mode not in ("tqdm", "auto"):
+                    raise ValueError("Only progress_mode='tqdm' is supported")
                 try:
                     from tqdm.std import tqdm
                 except Exception as exc:
                     raise RuntimeError("tqdm (std backend) is required for slurmcli.vmap progress output") from exc
-                iterator = tqdm(iterator, total=size, desc="slurmcli.vmap")
+                iterator = tqdm(range(size), total=size, desc="slurmcli.vmap")
+            else:
+                iterator = range(size)
             if _DEBUG_ENABLED:
                 logger.info("vmap: running locally for %d task(s)", size)
             results = [

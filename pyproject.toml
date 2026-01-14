@@ -26,3 +26,4 @@ test = [
 
 [project.scripts]
 slurmcli = "slurmcli.launch_slurm:main_cli"
+slurmcli-status = "slurmcli.status_cli:main"

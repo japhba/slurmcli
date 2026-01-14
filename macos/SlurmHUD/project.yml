@@ -1,0 +1,30 @@
+name: SlurmHUD
+options:
+  deploymentTarget:
+    macOS: "13.0"
+targets:
+  SlurmHUD:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/SlurmHUDApp
+      - Sources/Shared
+    info:
+      path: Sources/SlurmHUDApp/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jbauer.SlurmHUD
+    dependencies:
+      - target: SlurmHUDWidget
+  SlurmHUDWidget:
+    type: app-extension
+    platform: macOS
+    sources:
+      - Sources/SlurmHUDWidget
+      - Sources/Shared
+    info:
+      path: Sources/SlurmHUDWidget/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jbauer.SlurmHUDWidget
+        CODE_SIGN_STYLE: Automatic

@@ -542,6 +542,7 @@ NUM_JOBS = 4
 def get_cluster(
     *,
     local: bool = True,
+    n_workers: Optional[int] = None,
     num_jobs: int = NUM_JOBS,
     processes: int = PROCESSES_PER_WORKER,
     threads_per_worker: Optional[int] = None,
@@ -566,6 +567,13 @@ def get_cluster(
     threads_per_worker = int(max(1, threads_per_worker))
     processes = int(max(1, processes))
     num_jobs = int(max(1, num_jobs))
+    if not local and n_workers is not None:
+        num_jobs = int(max(1, (int(n_workers) + processes - 1) // processes))
+        logger.warning(
+            "n_workers is a convenience for SLURM and maps to num_jobs=%d (processes=%d).",
+            num_jobs,
+            processes,
+        )
     cores_for_job = threads_per_worker * processes
 
     dashboard_address = f":{PORT_SLURM_DASHBOARD}" if PORT_SLURM_DASHBOARD else None
@@ -581,7 +589,10 @@ def get_cluster(
 
     if local:
         print("🚀 Starting a local Dask cluster…")
-        n_workers_local = num_jobs * processes
+        if n_workers is not None:
+            n_workers_local = int(max(1, n_workers))
+        else:
+            n_workers_local = num_jobs * processes
         if local_processes is None:
             use_processes = not is_kernel()
         else:
@@ -604,6 +615,7 @@ def get_cluster(
             prologue.append(f"source {venv_activate}/bin/activate")
 
         job_extra_directives: List[str] = []
+        worker_extra_args: List[str] = []
         if nodelist:
             job_extra_directives.append(f"--nodelist={nodelist}")
         if gres and 'gpu' in (gres or ""):
@@ -612,6 +624,7 @@ def get_cluster(
                 if num_gpus > 0:
                     job_extra_directives.append(f"--gpus-per-task={num_gpus}")
                     job_extra_directives.append(f"--gpu-bind=single:{num_gpus}")
+                    worker_extra_args.extend(["--resources", f"GPU={num_gpus}"])
                     print(f"✅ Configuring workers with --gpus-per-task={num_gpus}")
             except Exception:
                 if gres:
@@ -628,12 +641,16 @@ def get_cluster(
             log_directory=log_dir,
             job_script_prologue=prologue,
             job_extra_directives=job_extra_directives,
+            worker_extra_args=worker_extra_args,
             scheduler_options=scheduler_options,
         )
         cluster.scale(n=num_jobs)
         client = Client(cluster)
 
-    total_workers_expected = num_jobs * processes
+    if n_workers is not None:
+        total_workers_expected = int(max(1, n_workers))
+    else:
+        total_workers_expected = num_jobs * processes
     print("Cluster dashboard:", getattr(cluster, "dashboard_link", "n/a"))
     print("Scheduler address:", client.scheduler.address)
     print(f"\n⏳ Waiting for {total_workers_expected} workers to connect…")

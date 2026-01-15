@@ -1,4 +1,5 @@
 import atexit
+import json
 import logging
 import os
 import sys
@@ -8,7 +9,7 @@ from collections import defaultdict
 from functools import partial
 from pathlib import Path
 import weakref
-from typing import Any, Iterable, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, Union
 import signal
 
 from dask import delayed
@@ -131,28 +132,104 @@ def stop_log_tailing():
 
 
 SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
+SCHEDULER_ADDRESS_MAP_FILE = Path().home() / ".dask_scheduler_addresses.json"
 DEFAULT_SCHEDULER_ADDRESS = f"tcp://{SCHEDULER_HOST}:{PORT_SLURM_SCHEDULER}"
 DEFAULT_MEMORY = f"{MEMORY_GB_DEFAULT}GB"
 
 
-def _load_saved_scheduler_address() -> Optional[str]:
-    """Return scheduler address stored on disk, if available."""
+def _normalize_scheduler_address(address: str) -> str:
+    if not address:
+        return address
+    if address.startswith("inproc://"):
+        return address
+    return address if "://" in address else f"tcp://{address}"
+
+
+def _load_scheduler_address_map() -> Dict[str, str]:
     try:
-        raw = SCHEDULER_ADDRESS_FILE.read_text(encoding="utf-8").strip()
+        raw = SCHEDULER_ADDRESS_MAP_FILE.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
-        return None
+        return {}
     except OSError as exc:
-        print(f"⚠️ Unable to read {SCHEDULER_ADDRESS_FILE}: {exc}")
-        return None
+        print(f"⚠️ Unable to read {SCHEDULER_ADDRESS_MAP_FILE}: {exc}")
+        return {}
     if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return {str(k): str(v) for k, v in data.items() if v}
+
+
+def _save_scheduler_address_map(data: Dict[str, str]) -> None:
+    try:
+        SCHEDULER_ADDRESS_MAP_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"⚠️ Unable to write {SCHEDULER_ADDRESS_MAP_FILE}: {exc}")
+
+
+def _load_saved_scheduler_address(target_type: Optional[str], *, allow_inproc: bool) -> Optional[str]:
+    """Return scheduler address stored on disk, preferring a type-specific entry."""
+    addr_map = _load_scheduler_address_map()
+    addr = None
+    if target_type:
+        addr = addr_map.get(target_type)
+    if not addr:
+        addr = addr_map.get("last")
+    if not addr:
+        try:
+            raw = SCHEDULER_ADDRESS_FILE.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            raw = ""
+        except OSError as exc:
+            print(f"⚠️ Unable to read {SCHEDULER_ADDRESS_FILE}: {exc}")
+            raw = ""
+        addr = raw
+
+    if not addr:
         return None
-    return raw if "://" in raw else f"tcp://{raw}"
+
+    addr = _normalize_scheduler_address(addr)
+    if addr.startswith("inproc://") and not allow_inproc:
+        return None
+    return addr
 
 
-def _connect_to_scheduler(timeout: str = "10s") -> Tuple[Client, str]:
+def _record_scheduler_address(address: str, cluster_type: Optional[str]) -> None:
+    addr = _normalize_scheduler_address(address)
+    try:
+        SCHEDULER_ADDRESS_FILE.write_text(addr)
+    except Exception:
+        pass
+
+    data = _load_scheduler_address_map()
+    data["last"] = addr
+    if cluster_type:
+        data[cluster_type] = addr
+    history = data.get("history", [])
+    if not isinstance(history, list):
+        history = []
+    history.append(
+        {
+            "address": addr,
+            "cluster_type": cluster_type or "unknown",
+            "timestamp": time.time(),
+        }
+    )
+    data["history"] = history
+    _save_scheduler_address_map(data)
+
+
+def _connect_to_scheduler(
+    timeout: str = "10s",
+    *,
+    target_type: Optional[str] = None,
+    allow_inproc: bool = True,
+) -> Tuple[Client, str]:
     """Connect to a running scheduler, preferring the last recorded address."""
     attempts = []
-    saved_addr = _load_saved_scheduler_address()
+    saved_addr = _load_saved_scheduler_address(target_type, allow_inproc=allow_inproc)
     if saved_addr:
         attempts.append(("saved", saved_addr))
     attempts.append(("configured", DEFAULT_SCHEDULER_ADDRESS))
@@ -165,10 +242,7 @@ def _connect_to_scheduler(timeout: str = "10s") -> Tuple[Client, str]:
                 print(f"ℹ️ Using scheduler address from {SCHEDULER_ADDRESS_FILE}: {address}")
             else:
                 print(f"ℹ️ Using configured scheduler address: {address}")
-            try:
-                SCHEDULER_ADDRESS_FILE.write_text(client.scheduler.address)
-            except Exception:
-                pass
+            _record_scheduler_address(client.scheduler.address, target_type)
             return client, address
         except Exception as exc:
             print(f"⚠️ Failed to connect to scheduler via {source} address ({address}): {exc}")
@@ -369,6 +443,7 @@ def _cluster_type_from_workers(workers: dict) -> Optional[str]:
 def get_client(
     *,
     local: bool = False,
+    n_workers: Optional[int] = None,
     partition: Optional[str] = None,
     walltime: Optional[str] = None,
     num_jobs: Optional[int] = None,
@@ -398,7 +473,7 @@ def get_client(
     cluster_type: Optional[str] = None,
     connect_timeout: str = "5s",
     local_processes: Optional[bool] = None,
-    reuse_existing: bool = True,
+    reuse_existing: bool = False,
 ) -> Union[Client, Tuple[Client, Any]]:
     """Connect to an existing scheduler or launch one if none is reachable.
 
@@ -421,7 +496,11 @@ def get_client(
     # Try to reuse an existing scheduler first
     if reuse_existing:
         try:
-            client, addr = _connect_to_scheduler(timeout=connect_timeout)
+            client, addr = _connect_to_scheduler(
+                timeout=connect_timeout,
+                target_type=target_type,
+                allow_inproc=local,
+            )
             has_workers = _wait_for_workers(client, worker_probe_attempts, worker_probe_delay)
             n_workers = len(client.scheduler_info().get("workers", {}))
             existing_type = _cluster_type_from_workers(client.scheduler_info().get("workers", {}))
@@ -435,46 +514,25 @@ def get_client(
                     target_type,
                 )
             elif has_workers and not type_matches:
-                logger.info(
-                    "Existing scheduler at %s has %d worker(s) of type %s; expected %s. Launching a new %s cluster.",
-                    addr,
-                    n_workers,
-                    existing_type or "unknown",
-                    target_type,
-                    "local" if local else "SLURM",
-                )
                 try:
                     client.close()
                 except Exception:
                     pass
-                client = None
-                need_launch = True
-            elif not has_workers and launch_if_no_workers:
-                logger.info(
-                    "Existing scheduler at %s has no workers after %d probe(s); launching a %s cluster.",
-                    addr,
-                    worker_probe_attempts,
-                    "local" if local else "SLURM",
+                raise RuntimeError(
+                    f"Existing scheduler at {addr} has worker type {existing_type or 'unknown'}; expected {target_type}."
                 )
+            elif not has_workers:
                 try:
                     client.close()
                 except Exception:
                     pass
-                client = None
-                need_launch = True
-            else:
-                logger.info(
-                    "Existing scheduler at %s has no workers (target type %s). Not launching because launch_if_no_workers=False.",
-                    addr,
-                    target_type,
+                raise RuntimeError(
+                    f"Existing scheduler at {addr} has no workers (target type {target_type})."
                 )
         except Exception as exc:
-            logger.info(
-                "No existing scheduler reachable (%s); launching a %s cluster.",
-                type(exc).__name__,
-                "local" if local else "SLURM",
-            )
-            need_launch = True
+            raise RuntimeError(
+                "reuse_existing=True but no matching scheduler is reachable."
+            ) from exc
     else:
         need_launch = True
 
@@ -491,6 +549,7 @@ def get_client(
 
         cluster, client = get_cluster(
             local=local,
+            n_workers=n_workers,
             queue=partition,
             account=account,
             num_jobs=jobs,
@@ -507,11 +566,8 @@ def get_client(
             verbose=verbose,
             local_processes=local_processes,
         )
-        try:
-            SCHEDULER_ADDRESS_FILE.write_text(client.scheduler.address)
-            logger.info("Scheduler address saved to %s", SCHEDULER_ADDRESS_FILE)
-        except Exception:
-            pass
+        _record_scheduler_address(client.scheduler.address, target_type)
+        logger.info("Scheduler address saved to %s", SCHEDULER_ADDRESS_FILE)
         if shutdown_on_exit:
             _register_cluster_cleanup(client, cluster)
         elif ensure_gc_cleanup:
@@ -695,9 +751,6 @@ def vmap(
             kwargs.pop("return_cluster", None)
             if "tail_logs" not in kwargs:
                 kwargs["tail_logs"] = False
-            if kwargs.get("local") and "reuse_existing" not in kwargs:
-                # Avoid hanging on stale remote scheduler addresses when running locally.
-                kwargs["reuse_existing"] = False
             if _DEBUG_ENABLED:
                 logger.info("vmap: acquiring client with %s", kwargs)
             active_client, cluster = get_client(return_cluster=True, **kwargs)

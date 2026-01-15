@@ -145,7 +145,7 @@ def _normalize_scheduler_address(address: str) -> str:
     return address if "://" in address else f"tcp://{address}"
 
 
-def _load_scheduler_address_map() -> Dict[str, str]:
+def _load_scheduler_address_map() -> Dict[str, Any]:
     try:
         raw = SCHEDULER_ADDRESS_MAP_FILE.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
@@ -159,24 +159,37 @@ def _load_scheduler_address_map() -> Dict[str, str]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return {}
-    return {str(k): str(v) for k, v in data.items() if v}
+    if isinstance(data, dict):
+        return data
+    return {}
 
 
-def _save_scheduler_address_map(data: Dict[str, str]) -> None:
+def _save_scheduler_address_map(data: Dict[str, Any]) -> None:
     try:
         SCHEDULER_ADDRESS_MAP_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception as exc:
         print(f"⚠️ Unable to write {SCHEDULER_ADDRESS_MAP_FILE}: {exc}")
 
 
-def _load_saved_scheduler_address(target_type: Optional[str], *, allow_inproc: bool) -> Optional[str]:
+def _load_saved_scheduler_address(
+    target_type: Optional[str],
+    *,
+    cluster_id: Optional[str],
+    allow_inproc: bool,
+) -> Optional[str]:
     """Return scheduler address stored on disk, preferring a type-specific entry."""
     addr_map = _load_scheduler_address_map()
     addr = None
-    if target_type:
+    if cluster_id:
+        by_id = addr_map.get("by_id", {})
+        if isinstance(by_id, dict):
+            addr = by_id.get(cluster_id)
+    if not addr and target_type:
         addr = addr_map.get(target_type)
     if not addr:
         addr = addr_map.get("last")
+    if not isinstance(addr, str):
+        addr = None
     if not addr:
         try:
             raw = SCHEDULER_ADDRESS_FILE.read_text(encoding="utf-8").strip()
@@ -196,7 +209,7 @@ def _load_saved_scheduler_address(target_type: Optional[str], *, allow_inproc: b
     return addr
 
 
-def _record_scheduler_address(address: str, cluster_type: Optional[str]) -> None:
+def _record_scheduler_address(address: str, cluster_type: Optional[str], cluster_id: Optional[str]) -> None:
     addr = _normalize_scheduler_address(address)
     try:
         SCHEDULER_ADDRESS_FILE.write_text(addr)
@@ -207,6 +220,12 @@ def _record_scheduler_address(address: str, cluster_type: Optional[str]) -> None
     data["last"] = addr
     if cluster_type:
         data[cluster_type] = addr
+    if cluster_id:
+        by_id = data.get("by_id", {})
+        if not isinstance(by_id, dict):
+            by_id = {}
+        by_id[str(cluster_id)] = addr
+        data["by_id"] = by_id
     history = data.get("history", [])
     if not isinstance(history, list):
         history = []
@@ -214,6 +233,7 @@ def _record_scheduler_address(address: str, cluster_type: Optional[str]) -> None
         {
             "address": addr,
             "cluster_type": cluster_type or "unknown",
+            "cluster_id": cluster_id or "unknown",
             "timestamp": time.time(),
         }
     )
@@ -225,14 +245,20 @@ def _connect_to_scheduler(
     timeout: str = "10s",
     *,
     target_type: Optional[str] = None,
+    cluster_id: Optional[str] = None,
     allow_inproc: bool = True,
 ) -> Tuple[Client, str]:
     """Connect to a running scheduler, preferring the last recorded address."""
     attempts = []
-    saved_addr = _load_saved_scheduler_address(target_type, allow_inproc=allow_inproc)
+    saved_addr = _load_saved_scheduler_address(
+        target_type,
+        cluster_id=cluster_id,
+        allow_inproc=allow_inproc,
+    )
     if saved_addr:
         attempts.append(("saved", saved_addr))
-    attempts.append(("configured", DEFAULT_SCHEDULER_ADDRESS))
+    if cluster_id is None:
+        attempts.append(("configured", DEFAULT_SCHEDULER_ADDRESS))
 
     last_error: Optional[Exception] = None
     for source, address in attempts:
@@ -242,7 +268,7 @@ def _connect_to_scheduler(
                 print(f"ℹ️ Using scheduler address from {SCHEDULER_ADDRESS_FILE}: {address}")
             else:
                 print(f"ℹ️ Using configured scheduler address: {address}")
-            _record_scheduler_address(client.scheduler.address, target_type)
+            _record_scheduler_address(client.scheduler.address, target_type, cluster_id)
             return client, address
         except Exception as exc:
             print(f"⚠️ Failed to connect to scheduler via {source} address ({address}): {exc}")
@@ -443,6 +469,7 @@ def _cluster_type_from_workers(workers: dict) -> Optional[str]:
 def get_client(
     *,
     local: bool = False,
+    cluster_id: Optional[str] = None,
     n_workers: Optional[int] = None,
     partition: Optional[str] = None,
     walltime: Optional[str] = None,
@@ -499,6 +526,7 @@ def get_client(
             client, addr = _connect_to_scheduler(
                 timeout=connect_timeout,
                 target_type=target_type,
+                cluster_id=cluster_id,
                 allow_inproc=local,
             )
             has_workers = _wait_for_workers(client, worker_probe_attempts, worker_probe_delay)
@@ -550,6 +578,7 @@ def get_client(
         cluster, client = get_cluster(
             local=local,
             n_workers=n_workers,
+            cluster_id=cluster_id,
             queue=partition,
             account=account,
             num_jobs=jobs,
@@ -566,7 +595,6 @@ def get_client(
             verbose=verbose,
             local_processes=local_processes,
         )
-        _record_scheduler_address(client.scheduler.address, target_type)
         logger.info("Scheduler address saved to %s", SCHEDULER_ADDRESS_FILE)
         if shutdown_on_exit:
             _register_cluster_cleanup(client, cluster)
@@ -654,6 +682,7 @@ def vmap(
     axis_name: Optional[str] = None,
     axis_size: Optional[int] = None,
     sequential: bool = False,
+    cluster_id: Optional[str] = None,
     client: Optional[Client] = None,
     show_progress: bool = True,
     progress_mode: str = "tqdm",
@@ -751,6 +780,8 @@ def vmap(
             kwargs.pop("return_cluster", None)
             if "tail_logs" not in kwargs:
                 kwargs["tail_logs"] = False
+            if cluster_id is not None:
+                kwargs["cluster_id"] = cluster_id
             if _DEBUG_ENABLED:
                 logger.info("vmap: acquiring client with %s", kwargs)
             active_client, cluster = get_client(return_cluster=True, **kwargs)

@@ -24,6 +24,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import select
 import signal
@@ -186,6 +187,7 @@ JUPYTER_PORT = int(CONFIG.get("jupyter_port"))
 VENV_ACTIVATE = CONFIG.get("venv_activate")
 DEFAULT_JUPYTER_RUNTIME_BASE = "/tmp/jrt"
 SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
+SCHEDULER_ADDRESS_MAP_FILE = Path().home() / ".dask_scheduler_addresses.json"
 
 LAST_LAUNCH_FILE = Path.home() / ".slurmcli_last_launch.json"
 SAVED_CONFIGS_FILE = Path.home() / ".slurmcli_saved_configs.json"
@@ -375,6 +377,86 @@ def is_port_available(port: Optional[int]) -> bool:
     return True
 
 
+_CLUSTER_ID_CHOICES = [
+    "brisk-otter",
+    "mellow-fox",
+    "sunny-heron",
+    "quiet-bison",
+    "lively-lynx",
+    "gentle-orca",
+    "frosty-wren",
+    "dusky-koala",
+    "amber-stoat",
+    "silver-hare",
+    "rapid-sparrow",
+    "jolly-ibis",
+    "calm-mantis",
+    "bright-pika",
+    "dusky-puma",
+    "steady-kestrel",
+    "bold-newt",
+    "glowing-ibex",
+    "swift-sable",
+    "serene-tern",
+]
+
+
+def _generate_cluster_id() -> str:
+    return random.choice(_CLUSTER_ID_CHOICES)
+
+
+def _normalize_scheduler_address(address: str) -> str:
+    if not address:
+        return address
+    if address.startswith("inproc://"):
+        return address
+    return address if "://" in address else f"tcp://{address}"
+
+
+def _record_scheduler_address(address: str, cluster_type: Optional[str], cluster_id: Optional[str]) -> None:
+    addr = _normalize_scheduler_address(address)
+    try:
+        SCHEDULER_ADDRESS_FILE.write_text(addr)
+    except Exception:
+        pass
+
+    data: Dict[str, Any] = {}
+    try:
+        raw = SCHEDULER_ADDRESS_MAP_FILE.read_text(encoding="utf-8").strip()
+        if raw:
+            data = json.loads(raw)
+    except Exception:
+        data = {}
+
+    data["last"] = addr
+    if cluster_type:
+        data[cluster_type] = addr
+    if cluster_id:
+        by_id = data.get("by_id", {})
+        if not isinstance(by_id, dict):
+            by_id = {}
+        by_id[str(cluster_id)] = addr
+        data["by_id"] = by_id
+
+    history = data.get("history", [])
+    if not isinstance(history, list):
+        history = []
+    history.append(
+        {
+            "address": addr,
+            "cluster_type": cluster_type or "unknown",
+            "cluster_id": cluster_id or "unknown",
+            "timestamp": time.time(),
+        }
+    )
+    data["history"] = history
+
+    try:
+        SCHEDULER_ADDRESS_MAP_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _run_squeue(args: List[str]) -> Optional[str]:
     try:
         result = subprocess.run(args, check=True, capture_output=True, text=True, timeout=8)
@@ -535,13 +617,14 @@ def _wait_for_workers_with_queue(
 WALLTIME = "01:00:00"
 MEMORY_GB_DEFAULT = 32
 PROCESSES_PER_WORKER = 1
-CORES = 1
+CORES = 4
 NUM_JOBS = 4
 
 
 def get_cluster(
     *,
     local: bool = True,
+    cluster_id: Optional[str] = None,
     n_workers: Optional[int] = None,
     num_jobs: int = NUM_JOBS,
     processes: int = PROCESSES_PER_WORKER,
@@ -567,6 +650,10 @@ def get_cluster(
     threads_per_worker = int(max(1, threads_per_worker))
     processes = int(max(1, processes))
     num_jobs = int(max(1, num_jobs))
+    if not local and cores == CORES:
+        gpu_hint = (("gpu" in (queue or "").lower()) or ("gpu" in (gres or "").lower()))
+        if gpu_hint:
+            cores = 4
     if not local and n_workers is not None:
         num_jobs = int(max(1, (int(n_workers) + processes - 1) // processes))
         logger.warning(
@@ -588,6 +675,8 @@ def get_cluster(
         scheduler_options["dashboard_address"] = dashboard_address
 
     if local:
+        if cluster_id is None:
+            cluster_id = _generate_cluster_id()
         print("🚀 Starting a local Dask cluster…")
         if n_workers is not None:
             n_workers_local = int(max(1, n_workers))
@@ -607,6 +696,8 @@ def get_cluster(
         )
         client = Client(cluster)
     else:
+        if cluster_id is None:
+            cluster_id = _generate_cluster_id()
         queue_label = f"the '{queue}' SLURM partition" if queue else "the default SLURM partition"
         print(f"🚀 Submitting {num_jobs} jobs to {queue_label}…")
         os.makedirs(log_dir, exist_ok=True)
@@ -646,6 +737,10 @@ def get_cluster(
         )
         cluster.scale(n=num_jobs)
         client = Client(cluster)
+
+    cluster_type = "local" if local else ("gpu" if ("gpu" in (queue or "").lower() or "gpu" in (gres or "").lower()) else "cpu")
+    _record_scheduler_address(client.scheduler.address, cluster_type, cluster_id)
+    print(f"🪪 Cluster id: {cluster_id}")
 
     if n_workers is not None:
         total_workers_expected = int(max(1, n_workers))

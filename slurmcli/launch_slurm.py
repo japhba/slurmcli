@@ -896,6 +896,7 @@ def get_cluster(
     print("Cluster dashboard:", getattr(cluster, "dashboard_link", "n/a"))
     print("Scheduler address:", client.scheduler.address)
     print(f"\n⏳ Waiting for {total_workers_expected} workers to connect…")
+    print(f"\n⏳ Waiting for {total_workers_expected} workers to connect…")
     try:
         if local:
             client.wait_for_workers(n_workers=total_workers_expected, timeout=300)
@@ -911,6 +912,32 @@ def get_cluster(
             )
     except Exception as exc:
         print(f"⚠️ Timed out waiting for {total_workers_expected} workers ({type(exc).__name__}: {exc})")
+        
+        # FAILURE HANDLING: Check for recent error logs
+        if not local:
+            try:
+                log_path = Path(log_dir)
+                if log_path.exists():
+                    # Find identifying job ID if possible, otherwise just latest err file
+                    # We might not know the exact job ID if submission returned successfully but we didn't parse output.
+                    # But we can look for the most recently modified *.err file
+                    err_files = sorted(log_path.glob("*.err"), key=os.path.getmtime, reverse=True)
+                    if err_files:
+                        latest_err = err_files[0]
+                        # Check if it was modified recently (e.g. in the last 2 minutes)
+                        if time.time() - os.path.getmtime(latest_err) < 120:
+                            print(f"\n🔎 Inspecting latest error log: {latest_err}")
+                            print("--- Last 10 lines of stderr ---")
+                            try:
+                                with open(latest_err, "r") as f:
+                                    lines = f.readlines()
+                                    for line in lines[-10:]:
+                                        print("   " + line.rstrip())
+                            except Exception:
+                                print("   (Unable to read log file)")
+                            print("--------------------------------")
+            except Exception:
+                pass
 
     sched_info = client.scheduler_info()
     workers = sched_info.get("workers", {})

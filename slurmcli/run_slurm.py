@@ -171,6 +171,109 @@ def _save_scheduler_address_map(data: Dict[str, Any]) -> None:
         print(f"⚠️ Unable to write {SCHEDULER_ADDRESS_MAP_FILE}: {exc}")
 
 
+def _collect_known_schedulers() -> list[Dict[str, Any]]:
+    data = _load_scheduler_address_map()
+    history = data.get("history", [])
+    entries: list[Dict[str, Any]] = []
+    if isinstance(history, list):
+        for item in history:
+            if isinstance(item, dict) and item.get("address"):
+                entries.append(item)
+    if not entries:
+        for key in ("last", "gpu", "cpu", "local"):
+            addr = data.get(key)
+            if isinstance(addr, str) and addr:
+                entries.append(
+                    {
+                        "address": addr,
+                        "cluster_type": key if key != "last" else "unknown",
+                        "cluster_id": "unknown",
+                        "timestamp": None,
+                    }
+                )
+    return entries
+
+
+def list_known_schedulers(max_entries: int = 20, *, print_out: bool = True) -> list[Dict[str, Any]]:
+    entries = _collect_known_schedulers()
+    entries = sorted(entries, key=lambda e: e.get("timestamp") or 0, reverse=True)
+    if max_entries and max_entries > 0:
+        entries = entries[:max_entries]
+    if print_out:
+        if not entries:
+            print("ℹ️ No scheduler history found in ~/.dask_scheduler_addresses.json")
+        else:
+            print("🔎 Known schedulers:")
+            for idx, entry in enumerate(entries, start=1):
+                addr = entry.get("address", "unknown")
+                ctype = entry.get("cluster_type", "unknown")
+                cid = entry.get("cluster_id", "unknown")
+                ts = entry.get("timestamp")
+                ts_str = (
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+                    if isinstance(ts, (int, float)) and ts
+                    else "unknown"
+                )
+                print(f"  {idx:2d}) {addr}  type={ctype}  id={cid}  seen={ts_str}")
+    return entries
+
+
+def _prompt_for_scheduler(
+    *,
+    target_type: Optional[str],
+    cluster_id: Optional[str],
+    allow_inproc: bool,
+) -> Optional[str]:
+    entries = _collect_known_schedulers()
+    entries = sorted(entries, key=lambda e: e.get("timestamp") or 0, reverse=True)
+    if not entries:
+        list_known_schedulers(print_out=True)
+        return None
+    display_entries = entries
+    if cluster_id:
+        cluster_filtered = [e for e in display_entries if e.get("cluster_id") == cluster_id]
+        if cluster_filtered:
+            display_entries = cluster_filtered
+    if target_type:
+        type_filtered = [e for e in display_entries if e.get("cluster_type") == target_type]
+        if type_filtered:
+            display_entries = type_filtered
+    if not display_entries:
+        display_entries = entries
+    print("🔎 Known schedulers:")
+    for idx, entry in enumerate(display_entries, start=1):
+        addr = entry.get("address", "unknown")
+        ctype = entry.get("cluster_type", "unknown")
+        cid = entry.get("cluster_id", "unknown")
+        ts = entry.get("timestamp")
+        ts_str = (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+            if isinstance(ts, (int, float)) and ts
+            else "unknown"
+        )
+        print(f"  {idx:2d}) {addr}  type={ctype}  id={cid}  seen={ts_str}")
+    prompt = "Select scheduler index (blank to cancel): "
+    try:
+        choice = input(prompt).strip()
+    except Exception:
+        return None
+    if not choice:
+        return None
+    try:
+        idx = int(choice)
+    except ValueError:
+        return None
+    if idx < 1 or idx > len(display_entries):
+        return None
+    address = display_entries[idx - 1].get("address")
+    if not isinstance(address, str):
+        return None
+    address = _normalize_scheduler_address(address)
+    if address.startswith("inproc://") and not allow_inproc:
+        return None
+    return address
+
+
 def _load_saved_scheduler_address(
     target_type: Optional[str],
     *,
@@ -285,11 +388,13 @@ def _register_cluster_cleanup(client: Client, cluster: Any) -> None:
     def _cleanup():
         stop_log_tailing()
         try:
+            logger.info("Closing Dask client (cluster_id=%s).", cluster_id or "unknown")
             client.close()
         except Exception:
             pass
         try:
             if cluster is not None:
+                logger.info("Closing Dask cluster (cluster_id=%s).", cluster_id or "unknown")
                 cluster.close()
         except Exception:
             pass
@@ -371,6 +476,20 @@ def _log_worker_allocations(client: Client) -> None:
         )
 
 
+def _resolve_tqdm(mode: str):
+    mode = (mode or "auto").lower()
+    if mode == "auto":
+        from tqdm.auto import tqdm
+        return tqdm
+    if mode == "notebook":
+        from tqdm.notebook import tqdm
+        return tqdm
+    if mode == "tqdm":
+        from tqdm.std import tqdm
+        return tqdm
+    raise ValueError("Only progress_mode='tqdm', 'notebook', or 'auto' is supported")
+
+
 class _TqdmProgressBar(ProgressBar):
     __loop = None
 
@@ -383,14 +502,22 @@ class _TqdmProgressBar(ProgressBar):
         loop=None,
         desc: str = "slurmcli.vmap",
         start: bool = True,
+        mode: str = "auto",
     ):
         self._loop_runner = loop_runner = LoopRunner(loop=loop)
         super().__init__(keys, scheduler, interval, complete)
         try:
-            from tqdm.std import tqdm
+            tqdm = _resolve_tqdm(mode)
         except Exception as exc:
-            raise RuntimeError("tqdm (std backend) is required for slurmcli.vmap progress output") from exc
-        self._tqdm = tqdm(total=0, desc=desc, leave=True, dynamic_ncols=True)
+            raise RuntimeError("tqdm is required for slurmcli.vmap progress output") from exc
+        self._tqdm = tqdm(
+            total=0,
+            desc=desc,
+            leave=True,
+            dynamic_ncols=True,
+            position=0,
+            file=sys.stderr,
+        )
         self._last_done = 0
 
         if start:
@@ -428,6 +555,20 @@ def _wait_for_workers(client: Client, attempts: int, delay: float) -> bool:
             logger.debug("Worker probe %d failed: %s", i + 1, exc, exc_info=False)
         time.sleep(delay)
     return False
+
+
+def _wait_for_worker_count_stable(client: Client, timeout: float, poll: float) -> int:
+    """Return the most recent worker count after a short stabilization window."""
+    deadline = time.time() + max(0.0, timeout)
+    last_count = 0
+    while time.time() <= deadline:
+        try:
+            workers = client.scheduler_info().get("workers", {})
+            last_count = len(workers)
+        except Exception:
+            break
+        time.sleep(max(0.1, poll))
+    return last_count
 
 
 def _infer_cluster_type(
@@ -471,8 +612,10 @@ def get_client(
     local: bool = False,
     cluster_id: Optional[str] = None,
     n_workers: Optional[int] = None,
+    num_workers: Optional[int] = None,
     partition: Optional[str] = None,
     walltime: Optional[str] = None,
+    begin_time: Optional[str] = None,
     num_jobs: Optional[int] = None,
     processes: Optional[int] = None,
     cores_per_process: Optional[int] = None,
@@ -480,12 +623,14 @@ def get_client(
     memory: Optional[str] = None,
     nodelist: Optional[str] = None,
     num_gpus: int = 0,
+    gpu_names: Optional[Iterable[str]] = None,
     gres: Optional[str] = None,
     account: str = "gcnu-ac",
     job_name: str = "tfl",
     log_dir: str = "dask_logs",
     venv_activate: Optional[str] = VENV_ACTIVATE,
     verbose: int = 0,
+    print_job_script: bool = False,
     tail_logs: bool = True,
     log_interval: float = 1.0,
     include_scheduler_logs: bool = True,
@@ -501,6 +646,10 @@ def get_client(
     connect_timeout: str = "5s",
     local_processes: Optional[bool] = None,
     reuse_existing: bool = False,
+    select_scheduler: bool = False,
+    wait_for_workers: bool = True,
+    wait_timeout: float = 5.0,
+    wait_poll: float = 0.5,
 ) -> Union[Client, Tuple[Client, Any]]:
     """Connect to an existing scheduler or launch one if none is reachable.
 
@@ -515,6 +664,9 @@ def get_client(
     process. Set `cluster_type` to `local`, `gpu`, or `cpu` to only reuse
     clusters whose workers match that type (default inferred from args).
     """
+    if n_workers is None and num_workers is not None:
+        n_workers = num_workers
+
     cluster = None
     client = None
     need_launch = False
@@ -523,12 +675,23 @@ def get_client(
     # Try to reuse an existing scheduler first
     if reuse_existing:
         try:
-            client, addr = _connect_to_scheduler(
-                timeout=connect_timeout,
-                target_type=target_type,
-                cluster_id=cluster_id,
-                allow_inproc=local,
-            )
+            selected_addr = None
+            if select_scheduler:
+                selected_addr = _prompt_for_scheduler(
+                    target_type=target_type,
+                    cluster_id=cluster_id,
+                    allow_inproc=local,
+                )
+            if selected_addr:
+                client = Client(selected_addr, timeout=connect_timeout)
+                addr = selected_addr
+            else:
+                client, addr = _connect_to_scheduler(
+                    timeout=connect_timeout,
+                    target_type=target_type,
+                    cluster_id=cluster_id,
+                    allow_inproc=local,
+                )
             has_workers = _wait_for_workers(client, worker_probe_attempts, worker_probe_delay)
             n_workers = len(client.scheduler_info().get("workers", {}))
             existing_type = _cluster_type_from_workers(client.scheduler_info().get("workers", {}))
@@ -536,10 +699,11 @@ def get_client(
 
             if has_workers and type_matches:
                 logger.info(
-                    "Reusing existing scheduler at %s with %d %s worker(s)",
+                    "Reusing existing scheduler at %s with %d %s worker(s) (cluster_id=%s)",
                     addr,
                     n_workers,
                     target_type,
+                    cluster_id or "unknown",
                 )
             elif has_workers and not type_matches:
                 try:
@@ -558,6 +722,7 @@ def get_client(
                     f"Existing scheduler at {addr} has no workers (target type {target_type})."
                 )
         except Exception as exc:
+            list_known_schedulers(print_out=True)
             raise RuntimeError(
                 "reuse_existing=True but no matching scheduler is reachable."
             ) from exc
@@ -587,12 +752,15 @@ def get_client(
             cores=cores,
             memory=mem,
             walltime=wall,
+            begin_time=begin_time,
             log_dir=log_dir,
             job_name=job_name,
             venv_activate=venv_activate,
             nodelist=nodelist,
             gres=effective_gres,
+            gpu_names=gpu_names,
             verbose=verbose,
+            print_job_script=print_job_script,
             local_processes=local_processes,
         )
         logger.info("Scheduler address saved to %s", SCHEDULER_ADDRESS_FILE)
@@ -613,6 +781,9 @@ def get_client(
             include_scheduler=include_scheduler_logs,
             n_lines=max_log_lines,
         )
+
+    if reuse_existing and not need_launch and wait_for_workers:
+        _wait_for_worker_count_stable(client, timeout=wait_timeout, poll=wait_poll)
 
     dash = _dashboard_url(client, cluster)
     if dash:
@@ -685,7 +856,7 @@ def vmap(
     cluster_id: Optional[str] = None,
     client: Optional[Client] = None,
     show_progress: bool = True,
-    progress_mode: str = "tqdm",
+    progress_mode: str = "auto",
     cache_check: Any = "auto",
     return_info: bool = False,
     disconnect: bool = True,
@@ -745,17 +916,14 @@ def vmap(
 
         if use_local:
             t0 = time.time()
-            if show_progress:
-                mode = (progress_mode or "tqdm").lower()
-                if mode not in ("tqdm", "auto"):
-                    raise ValueError("Only progress_mode='tqdm' is supported")
-                try:
-                    from tqdm.std import tqdm
-                except Exception as exc:
-                    raise RuntimeError("tqdm (std backend) is required for slurmcli.vmap progress output") from exc
-                iterator = tqdm(range(size), total=size, desc="slurmcli.vmap")
-            else:
-                iterator = range(size)
+            mode = (progress_mode or "auto").lower()
+            if mode not in ("tqdm", "notebook", "auto"):
+                raise ValueError("Only progress_mode='tqdm', 'notebook', or 'auto' is supported")
+            try:
+                tqdm = _resolve_tqdm(mode)
+            except Exception as exc:
+                raise RuntimeError("tqdm is required for slurmcli.vmap progress output") from exc
+            iterator = tqdm(range(size), total=size, desc="slurmcli.vmap")
             if _DEBUG_ENABLED:
                 logger.info("vmap: running locally for %d task(s)", size)
             results = [
@@ -794,16 +962,16 @@ def vmap(
         if _DEBUG_ENABLED:
             logger.info("vmap: submitting %d task(s) to Dask", len(tasks))
         futures = active_client.compute(tasks)
-        if show_progress:
-            mode = (progress_mode or "tqdm").lower()
-            if mode not in ("tqdm", "auto"):
-                raise ValueError("Only progress_mode='tqdm' is supported")
-            _TqdmProgressBar(
-                futures,
-                scheduler=active_client.scheduler.address if active_client else None,
-                interval="100ms",
-                complete=True,
-            )
+        mode = (progress_mode or "auto").lower()
+        if mode not in ("tqdm", "notebook", "auto"):
+            raise ValueError("Only progress_mode='tqdm', 'notebook', or 'auto' is supported")
+        _TqdmProgressBar(
+            futures,
+            scheduler=active_client.scheduler.address if active_client else None,
+            interval="100ms",
+            complete=True,
+            mode=mode,
+        )
         results = active_client.gather(futures)
         if _DEBUG_ENABLED:
             logger.info("vmap: gathered %d result(s)", len(results))
@@ -820,11 +988,13 @@ def vmap(
 
         if owns_client and disconnect:
             try:
+                logger.info("Closing Dask client after vmap (cluster_id=%s).", cluster_id or "unknown")
                 active_client.close()
             except Exception:
                 pass
             try:
                 if cluster is not None:
+                    logger.info("Closing Dask cluster after vmap (cluster_id=%s).", cluster_id or "unknown")
                     cluster.close()
             except Exception:
                 pass

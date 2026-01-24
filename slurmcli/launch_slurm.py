@@ -211,6 +211,7 @@ PERSISTED_LAUNCH_FIELDS = [
     "memory",
     "nodelist",
     "num_gpus",
+    "gpu_names",
     "gres",
     "launch_kernels",
 ]
@@ -226,6 +227,12 @@ def _normalize_launch_config(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 normalized[key] = int(normalized[key])
             except (TypeError, ValueError):
                 return None
+    gpu_names = normalized.get("gpu_names")
+    if isinstance(gpu_names, str):
+        names = [n.strip() for n in gpu_names.split(",") if n.strip()]
+        normalized["gpu_names"] = names or None
+    elif isinstance(gpu_names, (list, tuple)):
+        normalized["gpu_names"] = [str(n).strip() for n in gpu_names if str(n).strip()] or None
     normalized["launch_kernels"] = bool(normalized.get("launch_kernels", False))
     return normalized
 
@@ -312,6 +319,7 @@ def format_saved_timestamp(ts: Optional[float]) -> Optional[str]:
 def print_launch_summary(config: Dict[str, Any], *, title: str = "📋 LAUNCH SUMMARY") -> None:
     partition_display = config.get("partition") or "SLURM default (no explicit queue)"
     walltime = config.get("walltime", "unknown")
+    begin_time = config.get("begin_time")
     num_jobs = int(config.get("num_jobs") or 0)
     processes = int(config.get("processes") or 1)
     cores_per_process = int(config.get("cores_per_process") or 1)
@@ -321,6 +329,8 @@ def print_launch_summary(config: Dict[str, Any], *, title: str = "📋 LAUNCH SU
     total_workers = num_jobs * processes
     nodelist = config.get("nodelist") or "Any available"
     num_gpus = int(config.get("num_gpus") or 0)
+    gpu_names = config.get("gpu_names") or []
+    gpu_names = config.get("gpu_names") or []
     launch_kernels = bool(config.get("launch_kernels"))
 
     print("\n" + "=" * 50)
@@ -328,6 +338,8 @@ def print_launch_summary(config: Dict[str, Any], *, title: str = "📋 LAUNCH SU
     print("=" * 50)
     print(f"  Partition / Queue: {partition_display}")
     print(f"  Walltime:          {walltime}")
+    if begin_time:
+        print(f"  Begin time:        {begin_time}")
     print(f"  SLURM Jobs:        {num_jobs}")
     print(f"  Processes per job: {processes}")
     print(f"  Cores per process: {cores_per_process}")
@@ -337,6 +349,8 @@ def print_launch_summary(config: Dict[str, Any], *, title: str = "📋 LAUNCH SU
     print(f"  Total workers:     {total_workers}")
     print(f"  Specific node:     {nodelist}")
     print(f"  GPUs per process:  {num_gpus}")
+    if gpu_names:
+        print(f"  GPU model filter:  {', '.join(gpu_names)}")
     print(f"  Launch kernels:    {'Yes' if launch_kernels else 'No'}")
     print("=" * 50)
 
@@ -455,6 +469,31 @@ def _record_scheduler_address(address: str, cluster_type: Optional[str], cluster
         SCHEDULER_ADDRESS_MAP_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception:
         pass
+
+
+def _normalize_slurm_memory(memory: str) -> str:
+    text = (memory or "").strip()
+    if not text:
+        return text
+    upper = text.upper()
+    if upper.endswith("GB"):
+        return upper[:-2] + "G"
+    if upper.endswith("MB"):
+        return upper[:-2] + "M"
+    return text
+
+
+def _resolve_venv_paths(venv_activate: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    if not venv_activate:
+        return None, None
+    path = Path(venv_activate).expanduser()
+    if path.name == "activate" and path.parent.name == "bin":
+        activate_path = path
+        venv_root = path.parent.parent
+    else:
+        venv_root = path
+        activate_path = path / "bin" / "activate"
+    return str(venv_root), str(activate_path)
 
 
 def _run_squeue(args: List[str]) -> Optional[str]:
@@ -634,12 +673,15 @@ def get_cluster(
     queue: Optional[str] = None,
     account: str = "gcnu-ac",
     walltime: str = WALLTIME,
+    begin_time: Optional[str] = None,
     log_dir: str = "dask_logs",
     job_name: str = "tfl",
     venv_activate: Optional[str] = VENV_ACTIVATE,
     nodelist: Optional[str] = None,
     gres: Optional[str] = None,
+    gpu_names: Optional[Iterable[str]] = None,
     verbose: int = 0,
+    print_job_script: bool = False,
     local_processes: Optional[bool] = None,
     queue_poll_interval: float = 30.0,
     queue_report_max: int = 20,
@@ -700,15 +742,24 @@ def get_cluster(
             cluster_id = _generate_cluster_id()
         queue_label = f"the '{queue}' SLURM partition" if queue else "the default SLURM partition"
         print(f"🚀 Submitting {num_jobs} jobs to {queue_label}…")
+        memory = _normalize_slurm_memory(memory)
         os.makedirs(log_dir, exist_ok=True)
         prologue: List[str] = []
-        if venv_activate:
-            prologue.append(f"source {venv_activate}/bin/activate")
+        venv_root, activate_path = _resolve_venv_paths(venv_activate)
+        if activate_path:
+            prologue.append(f"source {activate_path}")
 
         job_extra_directives: List[str] = []
         worker_extra_args: List[str] = []
+        if begin_time:
+            job_extra_directives.append(f"--begin={begin_time}")
         if nodelist:
             job_extra_directives.append(f"--nodelist={nodelist}")
+        if gpu_names:
+            gpu_list = [str(name).strip() for name in gpu_names if str(name).strip()]
+            if gpu_list:
+                constraint = "|".join(gpu_list)
+                job_extra_directives.append(f"--constraint={constraint}")
         if gres and 'gpu' in (gres or ""):
             try:
                 num_gpus = int(gres.split(':')[-1])
@@ -721,7 +772,7 @@ def get_cluster(
                 if gres:
                     job_extra_directives.append(f"--gres={gres}")
 
-        cluster = SLURMCluster(
+        cluster_kwargs = dict(
             queue=queue,
             account=account or "",
             processes=processes,
@@ -735,6 +786,18 @@ def get_cluster(
             worker_extra_args=worker_extra_args,
             scheduler_options=scheduler_options,
         )
+        if venv_root:
+            cluster_kwargs["python"] = str(Path(venv_root) / "bin" / "python")
+        cluster = SLURMCluster(**cluster_kwargs)
+        try:
+            job_script = cluster.job_script()
+            logger.debug("SLURM job script:\n%s", job_script)
+            if print_job_script:
+                print("\n--- SLURM job script (debug) ---")
+                print(job_script)
+                print("--- End SLURM job script ---\n")
+        except Exception as exc:
+            logger.debug("Unable to render SLURM job script: %s", exc, exc_info=False)
         cluster.scale(n=num_jobs)
         client = Client(cluster)
 
@@ -972,8 +1035,10 @@ def execute_launch(
     walltime = launch_cfg.get("walltime") or WALLTIME
     memory = launch_cfg.get("memory") or f"{MEMORY_GB_DEFAULT}GB"
     selected_partition = launch_cfg.get("partition")
+    begin_time = launch_cfg.get("begin_time") or None
     nodelist = launch_cfg.get("nodelist") or None
     num_gpus = int(launch_cfg.get("num_gpus") or 0)
+    gpu_names = launch_cfg.get("gpu_names") or None
     gres = launch_cfg.get("gres")
     if not gres and num_gpus > 0:
         gres = f"gpu:{num_gpus}"
@@ -986,10 +1051,12 @@ def execute_launch(
             "cores_per_process": cores_per_process,
             "threads_per_worker": threads_per_worker,
             "walltime": walltime,
+            "begin_time": begin_time,
             "memory": memory,
             "partition": selected_partition,
             "nodelist": nodelist,
             "num_gpus": num_gpus,
+            "gpu_names": gpu_names,
             "gres": gres,
             "launch_kernels": launch_kernels,
         }
@@ -1018,9 +1085,12 @@ def execute_launch(
             cores=cores_per_process,
             memory=memory,
             walltime=walltime,
+            begin_time=begin_time,
             nodelist=nodelist,
             gres=gres,
+            gpu_names=gpu_names,
             verbose=verbosity,
+            print_job_script=True,
         )
         print("\n✅ Dask cluster is running!")
         print(f"   Reconnect with: Client('{client.scheduler.address}')")
@@ -1290,6 +1360,11 @@ def main_interactive(verbosity: int) -> None:
 
     # 2) Parameters
     walltime = prompt_for_value("Enter walltime [HH:MM:SS]", WALLTIME)
+    begin_time = None
+    schedule_choice = input("Schedule begin time? (y/n): ").strip().lower()
+    if schedule_choice == "y":
+        default_begin_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        begin_time = prompt_for_value("Enter begin time for SLURM (--begin)", default_begin_time, str)
     default_num_jobs = 1 if launch_kernels else NUM_JOBS
     default_processes = PROCESSES_PER_WORKER
     default_cores_per_process = 16 if launch_kernels else CORES
@@ -1381,25 +1456,44 @@ def main_interactive(verbosity: int) -> None:
             print("=" * 120)
             print(f"✓ = Available for job submission ({len(available_for_selection)} nodes)\n")
 
-            nodelist_choice = input("Enter index of specific node to use (leave empty for any): ").strip()
+            nodelist_choice = input("Enter index or comma-separated nodes/indices (leave empty for any): ").strip()
             if nodelist_choice:
-                try:
-                    nidx = int(nodelist_choice)
-                    if 1 <= nidx <= len(nodes_in_part):
-                        nodelist = nodes_in_part[nidx - 1]
+                choices = [c.strip() for c in nodelist_choice.split(",") if c.strip()]
+                selected_nodes: List[str] = []
+                for choice in choices:
+                    if choice.isdigit():
+                        nidx = int(choice)
+                        if 1 <= nidx <= len(nodes_in_part):
+                            selected_nodes.append(nodes_in_part[nidx - 1])
+                        else:
+                            print(f"⚠️  Invalid index '{choice}'; skipping.")
                     else:
-                        print("⚠️  Invalid index; proceeding without a specific node.")
-                except ValueError:
-                    print("⚠️  Invalid input; proceeding without a specific node.")
+                        if choice in nodes_in_part:
+                            selected_nodes.append(choice)
+                        else:
+                            print(f"⚠️  Unknown node '{choice}'; skipping.")
+                if selected_nodes:
+                    seen = set()
+                    unique_nodes: List[str] = []
+                    for node in selected_nodes:
+                        if node not in seen:
+                            unique_nodes.append(node)
+                            seen.add(node)
+                    nodelist = ",".join(unique_nodes)
+                else:
+                    print("⚠️  No valid nodes selected; proceeding without a specific node.")
     else:
         print("\nℹ️  Skipping node-specific selection; SLURM will apply its default partition rules.")
 
     num_gpus = prompt_for_value("Enter number of GPUs per process (0 for CPU-only)", 0, int)
     gres = f"gpu:{num_gpus}" if num_gpus > 0 else None
+    gpu_names_input = input("Optional GPU model filter (comma-separated, leave empty for any): ").strip()
+    gpu_names = [n.strip() for n in gpu_names_input.split(",") if n.strip()] if gpu_names_input else None
 
     launch_config = {
         "partition": selected_partition,
         "walltime": walltime,
+        "begin_time": begin_time,
         "num_jobs": num_jobs,
         "processes": processes,
         "cores_per_process": cores_per_process,
@@ -1407,6 +1501,7 @@ def main_interactive(verbosity: int) -> None:
         "memory": memory,
         "nodelist": nodelist,
         "num_gpus": num_gpus,
+        "gpu_names": gpu_names,
         "gres": gres,
         "launch_kernels": launch_kernels,
     }

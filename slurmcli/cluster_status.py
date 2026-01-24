@@ -489,13 +489,16 @@ def get_partitions(show_all: bool = False) -> Optional[Dict[int, Dict[str, Any]]
             part_data[partition]['cpu_stats'].append(cpus)
             part_data[partition]['gres'].add(gres)
 
-            for node_expr in nodes.split(','):
-                node_expr = node_expr.strip()
-                if not node_expr:
-                    continue
-                if node_expr not in expansion_cache:
-                    expansion_cache[node_expr] = expand_nodelist(node_expr)
-                for expanded in expansion_cache[node_expr]:
+            part_data[partition]['states'].add(state)
+            part_data[partition]['cpu_stats'].append(cpus)
+            part_data[partition]['gres'].add(gres)
+
+            # Fix: Do not split by comma manually, as nodelists can contain brackets like "node[1-3],other[4]"
+            # Passing the entire string to expand_nodelist (via scontrol) handles this correctly.
+            if nodes and nodes not in {"(null)", "None"}:
+                if nodes not in expansion_cache:
+                    expansion_cache[nodes] = expand_nodelist(nodes)
+                for expanded in expansion_cache[nodes]:
                     part_data[partition]['nodes'].add(expanded)
 
         if not part_data:

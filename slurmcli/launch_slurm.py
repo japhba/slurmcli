@@ -128,6 +128,19 @@ def _save_config_file(path: Path, data: Dict[str, Any]) -> None:
         print(f"⚠️  Unable to persist credentials to {path}: {exc}")
 
 
+import readline
+
+def input_with_prefill(prompt: str, text: str) -> str:
+    def hook():
+        readline.insert_text(text)
+        readline.redisplay()
+    readline.set_startup_hook(hook)
+    try:
+        return input(prompt)
+    finally:
+        readline.set_startup_hook()
+
+
 def load_credentials() -> Dict[str, Any]:
     config: Dict[str, Any] = {}
     file_cache = _load_config_file(CONFIG_FILE)
@@ -149,7 +162,14 @@ def load_credentials() -> Dict[str, Any]:
                 continue
             except ValueError:
                 pass
-        missing.append(field)
+        
+        # If it has a default, use it but don't consider it "missing" for the mandatory loop 
+        # UNLESS we want to force prompting. 
+        # For venv_activate, we will handle it separately below.
+        if field.get("default") is not None:
+             config[key] = field["default"]
+        else:
+             missing.append(field)
 
     if missing:
         print("\n🗝️  slurmcli needs a few credentials to continue.")
@@ -175,6 +195,65 @@ def load_credentials() -> Dict[str, Any]:
         _save_config_file(CONFIG_FILE, file_cache)
 
     logger.info("Loaded slurmcli configuration: %s", {k: config.get(k) for k in sorted(config)})
+    
+    # Interactive override for venv
+    # Only if we are in an interactive session
+    if sys.stdin.isatty():
+        # We always ask for venv, pre-filled with the current determination (config file, env, default)
+        current_venv = str(config.get("venv_activate", ""))
+        
+        # Setup readline for path completion if possible
+        readline.set_completer_delims(' \t\n;')
+        readline.parse_and_bind("tab: complete")
+
+        while True:
+            print(f"\nrunning with venv: {current_venv}")
+            print("Press ENTER to accept, or type a new path (TAB completion supported).")
+            
+            new_venv = input_with_prefill("venv path: ", current_venv).strip()
+            if not new_venv:
+                # User cleared it, which is valid (no venv)
+                config["venv_activate"] = ""
+                break
+                
+            # Basic validation
+            venv_path = Path(new_venv).expanduser()
+            
+            # 1. Pointing to activate script
+            if venv_path.name == "activate" and venv_path.parent.name == "bin":
+                 check_path = venv_path
+            # 2. Pointing to python executable
+            elif venv_path.name.startswith("python") and venv_path.parent.name == "bin":
+                 check_path = venv_path.parent / "activate"
+            # 3. Pointing to venv root
+            else:
+                 check_path = venv_path / "bin" / "activate"
+            
+            if check_path.exists():
+                config["venv_activate"] = new_venv
+                break
+            
+            # Fallback check (if they pointed to root but activate missing, maybe checking for python helps confirm intent?)
+            # But strictly we need activate for sourcing.
+            
+            print(f"⚠️  Warning: Could not find '{check_path}'.")
+            confirm = input(f"   Keep '{new_venv}' anyway? (y/N): ").strip().lower()
+            if confirm == 'y':
+                config["venv_activate"] = new_venv
+                break
+            
+            # loop again, likely pre-filling with what they just typed so they can fix it
+            current_venv = new_venv
+
+        if config.get("venv_activate"):
+             logger.info("Updated venv_activate to: %s", config["venv_activate"])
+        
+        # Persist the choice if it changed
+        current_persistent = str(file_cache.get("venv_activate", ""))
+        if config.get("venv_activate", "") != current_persistent:
+            file_cache["venv_activate"] = config.get("venv_activate", "")
+            _save_config_file(CONFIG_FILE, file_cache)
+
     return config
 
 
@@ -490,7 +569,12 @@ def _resolve_venv_paths(venv_activate: Optional[str]) -> Tuple[Optional[str], Op
     if path.name == "activate" and path.parent.name == "bin":
         activate_path = path
         venv_root = path.parent.parent
+    elif path.name.startswith("python") and path.parent.name == "bin":
+        # Handle case where user provides path to python executable
+        venv_root = path.parent.parent
+        activate_path = path.parent / "activate"
     else:
+        # Assume it is the root directory
         venv_root = path
         activate_path = path / "bin" / "activate"
     return str(venv_root), str(activate_path)

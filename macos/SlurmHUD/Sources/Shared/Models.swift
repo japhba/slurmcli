@@ -1,11 +1,11 @@
 import Foundation
 
-struct ClusterSnapshot: Decodable {
+struct ClusterSnapshot: Codable {
     let generated_at: String?
     let partitions: [Partition]
 }
 
-struct Partition: Decodable, Identifiable {
+struct Partition: Codable, Identifiable {
     let idx: Int?
     let partition: String?
     let states: [String]?
@@ -16,7 +16,7 @@ struct Partition: Decodable, Identifiable {
     var id: String { partition ?? UUID().uuidString }
 }
 
-struct PartitionConfig: Decodable {
+struct PartitionConfig: Codable {
     let mem_gb: Int?
     let cpus: Int?
     let gpus: Int?
@@ -28,7 +28,7 @@ struct PartitionConfig: Decodable {
     let users_max: Int?
 }
 
-struct NodeDetail: Decodable, Identifiable {
+struct NodeDetail: Codable, Identifiable {
     let node: String?
     let state: String?
     let memory_gb: Double?
@@ -43,7 +43,7 @@ struct NodeDetail: Decodable, Identifiable {
     var id: String { node ?? UUID().uuidString }
 }
 
-struct JobDetail: Decodable {
+struct JobDetail: Codable {
     let name: String?
     let user: String?
     let time_info: String?

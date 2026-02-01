@@ -1,0 +1,465 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 63;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		2EA8A28A349743BDC03E26E6 /* SlurmHUDWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B296F1568362AFC5F0AA3774 /* SlurmHUDWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		2EE917A1F2C4B3C78353EE8A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */; };
+		3165CE5950ADBA89F7AB0B8B /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */; };
+		6B7F3A62DFE7F31021D84A29 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8FFEB2916E988CF93EDD54A /* Models.swift */; };
+		7C1CCF0ADE3E6C6508B69558 /* StatusFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B9339635131CE857A3CCE3 /* StatusFetcher.swift */; };
+		883A211729CA689343B57F4A /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59A31133703E85DBB85CCEDA /* Config.swift */; };
+		91A3F94B6A0AE5A2897D64A1 /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59A31133703E85DBB85CCEDA /* Config.swift */; };
+		98D158557CBBB76E49FD043B /* StatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31A23D88138AD89C6871438B /* StatusView.swift */; };
+		AE65084B7C48B2122C423DA2 /* SSHRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D07E1604DCA874467F688E56 /* SSHRunner.swift */; };
+		C3E4255E3C1BF472F7AB8F41 /* SlurmHUDWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37354B5FB24A7D5044F5572E /* SlurmHUDWidget.swift */; };
+		C57CA788F58DAD2576BFACFD /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8FFEB2916E988CF93EDD54A /* Models.swift */; };
+		C74207D654398066406BE42C /* SlurmHUDApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63B652A546791EB6847E6E0B /* SlurmHUDApp.swift */; };
+		CB40C3AD57A87C8C8EEAA4D0 /* StatusFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B9339635131CE857A3CCE3 /* StatusFetcher.swift */; };
+		EDC6B4A2024D2133813213D6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DDF7244D503C8066EFE6400 /* SettingsView.swift */; };
+		F7FAE03A7624807AD4E2B0A0 /* SSHRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D07E1604DCA874467F688E56 /* SSHRunner.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		0308B9C46511B4BB3710FACB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E9AD3AD616E2B281F7F72B29 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3347F3851F815A559A98174A;
+			remoteInfo = SlurmHUDWidget;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		FB66651C88247D1B2DB7BFDD /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				2EA8A28A349743BDC03E26E6 /* SlurmHUDWidget.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		2DDF7244D503C8066EFE6400 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		31A23D88138AD89C6871438B /* StatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusView.swift; sourceTree = "<group>"; };
+		37354B5FB24A7D5044F5572E /* SlurmHUDWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlurmHUDWidget.swift; sourceTree = "<group>"; };
+		45B9339635131CE857A3CCE3 /* StatusFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusFetcher.swift; sourceTree = "<group>"; };
+		59A31133703E85DBB85CCEDA /* Config.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Config.swift; sourceTree = "<group>"; };
+		63B652A546791EB6847E6E0B /* SlurmHUDApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlurmHUDApp.swift; sourceTree = "<group>"; };
+		69392BD9DDEFBA1D61C87DA3 /* SlurmHUDWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SlurmHUDWidget.entitlements; sourceTree = "<group>"; };
+		758E8E2CDB2AFEDEA75A471D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
+		B296F1568362AFC5F0AA3774 /* SlurmHUDWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SlurmHUDWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		BDCA8DC2E9FE47CF46222EF4 /* SlurmHUD.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SlurmHUD.entitlements; sourceTree = "<group>"; };
+		CD85FFD788E21166230A1B3D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		D07E1604DCA874467F688E56 /* SSHRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHRunner.swift; sourceTree = "<group>"; };
+		ED81FBA12626A8A6145C6435 /* SlurmHUD.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SlurmHUD.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F8FFEB2916E988CF93EDD54A /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		0C4E9357D01265451D7FE363 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				59A31133703E85DBB85CCEDA /* Config.swift */,
+				7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */,
+				F8FFEB2916E988CF93EDD54A /* Models.swift */,
+				D07E1604DCA874467F688E56 /* SSHRunner.swift */,
+				45B9339635131CE857A3CCE3 /* StatusFetcher.swift */,
+			);
+			name = Shared;
+			path = Sources/Shared;
+			sourceTree = "<group>";
+		};
+		1A605F2283E36C9F2AFA9359 /* SlurmHUDWidget */ = {
+			isa = PBXGroup;
+			children = (
+				758E8E2CDB2AFEDEA75A471D /* Info.plist */,
+				69392BD9DDEFBA1D61C87DA3 /* SlurmHUDWidget.entitlements */,
+				37354B5FB24A7D5044F5572E /* SlurmHUDWidget.swift */,
+			);
+			name = SlurmHUDWidget;
+			path = Sources/SlurmHUDWidget;
+			sourceTree = "<group>";
+		};
+		87F0AF84C3C6A1FB5B5E8736 = {
+			isa = PBXGroup;
+			children = (
+				0C4E9357D01265451D7FE363 /* Shared */,
+				F59CF608AD3ACB9265CEEB1C /* SlurmHUDApp */,
+				1A605F2283E36C9F2AFA9359 /* SlurmHUDWidget */,
+				E3A22B09C58AFCD7F9B018AA /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E3A22B09C58AFCD7F9B018AA /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				ED81FBA12626A8A6145C6435 /* SlurmHUD.app */,
+				B296F1568362AFC5F0AA3774 /* SlurmHUDWidget.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		F59CF608AD3ACB9265CEEB1C /* SlurmHUDApp */ = {
+			isa = PBXGroup;
+			children = (
+				CD85FFD788E21166230A1B3D /* Info.plist */,
+				2DDF7244D503C8066EFE6400 /* SettingsView.swift */,
+				BDCA8DC2E9FE47CF46222EF4 /* SlurmHUD.entitlements */,
+				63B652A546791EB6847E6E0B /* SlurmHUDApp.swift */,
+				31A23D88138AD89C6871438B /* StatusView.swift */,
+			);
+			name = SlurmHUDApp;
+			path = Sources/SlurmHUDApp;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0A483570330B763CC2B714D3 /* SlurmHUD */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 072F2CA31530BA435E113A1A /* Build configuration list for PBXNativeTarget "SlurmHUD" */;
+			buildPhases = (
+				23E6DDF172901DC3E7FA2018 /* Sources */,
+				FB66651C88247D1B2DB7BFDD /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FCA4CD90E6996D12F412F6A0 /* PBXTargetDependency */,
+			);
+			name = SlurmHUD;
+			packageProductDependencies = (
+			);
+			productName = SlurmHUD;
+			productReference = ED81FBA12626A8A6145C6435 /* SlurmHUD.app */;
+			productType = "com.apple.product-type.application";
+		};
+		3347F3851F815A559A98174A /* SlurmHUDWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 228E6115C927FA17FABD037C /* Build configuration list for PBXNativeTarget "SlurmHUDWidget" */;
+			buildPhases = (
+				BE04542224815AAF5636A903 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SlurmHUDWidget;
+			packageProductDependencies = (
+			);
+			productName = SlurmHUDWidget;
+			productReference = B296F1568362AFC5F0AA3774 /* SlurmHUDWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E9AD3AD616E2B281F7F72B29 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					0A483570330B763CC2B714D3 = {
+						ProvisioningStyle = Automatic;
+					};
+					3347F3851F815A559A98174A = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = B5851B2B8F9D172E47DAA910 /* Build configuration list for PBXProject "SlurmHUD" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 87F0AF84C3C6A1FB5B5E8736;
+			minimizedProjectReferenceProxies = 1;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				0A483570330B763CC2B714D3 /* SlurmHUD */,
+				3347F3851F815A559A98174A /* SlurmHUDWidget */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		23E6DDF172901DC3E7FA2018 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				91A3F94B6A0AE5A2897D64A1 /* Config.swift in Sources */,
+				2EE917A1F2C4B3C78353EE8A /* Helpers.swift in Sources */,
+				C57CA788F58DAD2576BFACFD /* Models.swift in Sources */,
+				F7FAE03A7624807AD4E2B0A0 /* SSHRunner.swift in Sources */,
+				EDC6B4A2024D2133813213D6 /* SettingsView.swift in Sources */,
+				C74207D654398066406BE42C /* SlurmHUDApp.swift in Sources */,
+				CB40C3AD57A87C8C8EEAA4D0 /* StatusFetcher.swift in Sources */,
+				98D158557CBBB76E49FD043B /* StatusView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BE04542224815AAF5636A903 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				883A211729CA689343B57F4A /* Config.swift in Sources */,
+				3165CE5950ADBA89F7AB0B8B /* Helpers.swift in Sources */,
+				6B7F3A62DFE7F31021D84A29 /* Models.swift in Sources */,
+				AE65084B7C48B2122C423DA2 /* SSHRunner.swift in Sources */,
+				C3E4255E3C1BF472F7AB8F41 /* SlurmHUDWidget.swift in Sources */,
+				7C1CCF0ADE3E6C6508B69558 /* StatusFetcher.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		FCA4CD90E6996D12F412F6A0 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3347F3851F815A559A98174A /* SlurmHUDWidget */;
+			targetProxy = 0308B9C46511B4BB3710FACB /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		06731388D2F896E95261BBF2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 8XAD7C8Z68;
+				INFOPLIST_FILE = Sources/SlurmHUDWidget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD.SlurmHUDWidget;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		4CA015D3523C75B58A85A74C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 8XAD7C8Z68;
+				INFOPLIST_FILE = Sources/SlurmHUDApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		4EA9BDAD48C0215849C5F817 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 8XAD7C8Z68;
+				INFOPLIST_FILE = Sources/SlurmHUDApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		A1E4783818E68E2DFE02C41D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		D0C806B2F3C948F8919CAA86 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 8XAD7C8Z68;
+				INFOPLIST_FILE = Sources/SlurmHUDWidget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD.SlurmHUDWidget;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		DED1A7F51A61FC2EDC88957A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		072F2CA31530BA435E113A1A /* Build configuration list for PBXNativeTarget "SlurmHUD" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4CA015D3523C75B58A85A74C /* Debug */,
+				4EA9BDAD48C0215849C5F817 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		228E6115C927FA17FABD037C /* Build configuration list for PBXNativeTarget "SlurmHUDWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D0C806B2F3C948F8919CAA86 /* Debug */,
+				06731388D2F896E95261BBF2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B5851B2B8F9D172E47DAA910 /* Build configuration list for PBXProject "SlurmHUD" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1E4783818E68E2DFE02C41D /* Debug */,
+				DED1A7F51A61FC2EDC88957A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = E9AD3AD616E2B281F7F72B29 /* Project object */;
+}

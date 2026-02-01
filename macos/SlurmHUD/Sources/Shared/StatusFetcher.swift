@@ -19,11 +19,15 @@ final class StatusFetcher: ObservableObject {
                 DispatchQueue.main.async {
                     self.snapshot = snapshot
                     self.lastError = nil
+                    // Cache snapshot for widget access
+                    SnapshotCache.save(snapshot: snapshot)
                     completion?(snapshot)
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.lastError = "\(error)"
+                    // Cache error for widget
+                    SnapshotCache.saveError("\(error)")
                     completion?(nil)
                 }
             }

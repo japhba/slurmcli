@@ -40,7 +40,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # Third-party (kept for parity with original script)
 import numpy as np  # noqa: F401
-import jax, jax.numpy as jnp  # noqa: F401
 from dask import delayed  # noqa: F401
 from dask.distributed import Client, LocalCluster
 from distributed.utils import is_kernel
@@ -98,6 +97,7 @@ CONFIG_FIELDS: List[Dict[str, Any]] = [
     {"key": "scheduler_port", "env": "SLURMCLI_SCHEDULER_PORT", "prompt": "Dask scheduler port", "type": int, "default": 8786},
     {"key": "dashboard_port", "env": "SLURMCLI_DASHBOARD_PORT", "prompt": "Dask dashboard port", "type": int, "default": 8787},
     {"key": "jupyter_port", "env": "SLURMCLI_JUPYTER_PORT", "prompt": "Base Jupyter port", "type": int, "default": 11833},
+    {"key": "jupyter_require_token", "env": "SLURMCLI_JUPYTER_REQUIRE_TOKEN", "prompt": "Require token auth for Jupyter (set False for VSCode)", "type": bool, "default": False},
     {"key": "venv_activate", "env": "SLURMCLI_VENV_ACTIVATE", "prompt": "Path to Python virtualenv to activate in workers", "type": str, "default": "/nfs/nhome/live/jbauer/recurrent_feature/.venv"},
 ]
 
@@ -107,6 +107,10 @@ def _cast_value(value: Any, typ: type) -> Any:
         return int(value)
     if typ is float:
         return float(value)
+    if typ is bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).lower() in ("true", "1", "yes")
     return str(value)
 
 
@@ -139,6 +143,19 @@ def input_with_prefill(prompt: str, text: str) -> str:
         return input(prompt)
     finally:
         readline.set_startup_hook()
+
+
+def _detect_venv_suggestions(cwd: Path) -> List[Dict[str, str]]:
+    """Scan cwd for pyproject.toml and venv directories."""
+    suggestions = []
+    pyproject = cwd / "pyproject.toml"
+    if pyproject.exists():
+        suggestions.append({"label": "pyproject.toml", "type": "pyproject", "path": str(cwd.resolve())})
+    for venv_name in (".venv", "venv"):
+        venv_dir = cwd / venv_name
+        if (venv_dir / "bin" / "activate").exists():
+            suggestions.append({"label": f"{venv_name}/", "type": "venv", "path": str(venv_dir.resolve())})
+    return suggestions
 
 
 def load_credentials() -> Dict[str, Any]:
@@ -195,63 +212,98 @@ def load_credentials() -> Dict[str, Any]:
         _save_config_file(CONFIG_FILE, file_cache)
 
     logger.info("Loaded slurmcli configuration: %s", {k: config.get(k) for k in sorted(config)})
-    
+
+    # Load venv_mode from file (not in CONFIG_FIELDS, derived from user selection)
+    config.setdefault("venv_mode", file_cache.get("venv_mode", "activate"))
+
     # Interactive override for venv
-    # Only if we are in an interactive session
     if sys.stdin.isatty():
-        # We always ask for venv, pre-filled with the current determination (config file, env, default)
         current_venv = str(config.get("venv_activate", ""))
-        
-        # Setup readline for path completion if possible
+        current_mode = str(config.get("venv_mode", "activate"))
+
         readline.set_completer_delims(' \t\n;')
         readline.parse_and_bind("tab: complete")
 
-        while True:
-            print(f"\nrunning with venv: {current_venv}")
-            print("Press ENTER to accept, or type a new path (TAB completion supported).")
-            
-            new_venv = input_with_prefill("venv path: ", current_venv).strip()
-            if not new_venv:
-                # User cleared it, which is valid (no venv)
-                config["venv_activate"] = ""
-                break
-                
-            # Basic validation
-            venv_path = Path(new_venv).expanduser()
-            
-            # 1. Pointing to activate script
-            if venv_path.name == "activate" and venv_path.parent.name == "bin":
-                 check_path = venv_path
-            # 2. Pointing to python executable
-            elif venv_path.name.startswith("python") and venv_path.parent.name == "bin":
-                 check_path = venv_path.parent / "activate"
-            # 3. Pointing to venv root
-            else:
-                 check_path = venv_path / "bin" / "activate"
-            
-            if check_path.exists():
-                config["venv_activate"] = new_venv
-                break
-            
-            # Fallback check (if they pointed to root but activate missing, maybe checking for python helps confirm intent?)
-            # But strictly we need activate for sourcing.
-            
-            print(f"⚠️  Warning: Could not find '{check_path}'.")
-            confirm = input(f"   Keep '{new_venv}' anyway? (y/N): ").strip().lower()
-            if confirm == 'y':
-                config["venv_activate"] = new_venv
-                break
-            
-            # loop again, likely pre-filling with what they just typed so they can fix it
-            current_venv = new_venv
+        suggestions = _detect_venv_suggestions(Path.cwd())
 
-        if config.get("venv_activate"):
-             logger.info("Updated venv_activate to: %s", config["venv_activate"])
-        
-        # Persist the choice if it changed
-        current_persistent = str(file_cache.get("venv_activate", ""))
-        if config.get("venv_activate", "") != current_persistent:
-            file_cache["venv_activate"] = config.get("venv_activate", "")
+        print(f"\n📦 Virtual environment:")
+        if suggestions:
+            print(f"  Detected in {Path.cwd()}:")
+            for i, s in enumerate(suggestions, 1):
+                desc = "build fresh venv with uv" if s["type"] == "pyproject" else "existing virtualenv"
+                print(f"    [{i}] {s['label']} → {desc}")
+        if current_venv:
+            mode_label = " (pyproject)" if current_mode == "pyproject" else ""
+            print(f"  Current: {current_venv}{mode_label}")
+
+        hint_parts = []
+        if suggestions:
+            hint_parts.append(f"[1-{len(suggestions)}]")
+        hint_parts.append("path")
+        hint_parts.append("'none'")
+        if current_venv:
+            hint_parts.append("ENTER to keep")
+        hint = ", ".join(hint_parts)
+
+        while True:
+            choice = input(f"  ({hint})> ").strip()
+
+            if not choice:
+                break
+
+            if choice.lower() == "none":
+                config["venv_activate"] = ""
+                config["venv_mode"] = "activate"
+                break
+
+            # Numbered suggestion
+            if choice.isdigit() and suggestions and 1 <= int(choice) <= len(suggestions):
+                s = suggestions[int(choice) - 1]
+                config["venv_activate"] = s["path"]
+                config["venv_mode"] = s["type"]
+                break
+
+            # Path to pyproject.toml directly
+            p = Path(choice).expanduser().resolve()
+            if p.name == "pyproject.toml" and p.exists():
+                config["venv_activate"] = str(p.parent)
+                config["venv_mode"] = "pyproject"
+                break
+
+            # Directory containing pyproject.toml (but no venv)
+            if p.is_dir() and (p / "pyproject.toml").exists() and not (p / "bin" / "activate").exists():
+                config["venv_activate"] = str(p)
+                config["venv_mode"] = "pyproject"
+                break
+
+            # Standard venv path validation
+            if p.name == "activate" and p.parent.name == "bin":
+                check_path = p
+            elif p.name.startswith("python") and p.parent.name == "bin":
+                check_path = p.parent / "activate"
+            else:
+                check_path = p / "bin" / "activate"
+
+            if check_path.exists():
+                config["venv_activate"] = choice
+                config["venv_mode"] = "activate"
+                break
+
+            print(f"  ⚠️ Could not validate '{choice}'.")
+            if input("  Keep anyway? (y/N): ").strip().lower() == 'y':
+                config["venv_activate"] = choice
+                config["venv_mode"] = "activate"
+                break
+
+        logger.info("venv_activate=%s venv_mode=%s", config.get("venv_activate"), config.get("venv_mode"))
+
+        # Persist changes
+        changed = False
+        for key in ("venv_activate", "venv_mode"):
+            if str(config.get(key, "")) != str(file_cache.get(key, "")):
+                file_cache[key] = config.get(key, "")
+                changed = True
+        if changed:
             _save_config_file(CONFIG_FILE, file_cache)
 
     return config
@@ -263,7 +315,9 @@ SCHEDULER_HOST = CONFIG.get("scheduler_host")
 PORT_SLURM_SCHEDULER = int(CONFIG.get("scheduler_port"))
 PORT_SLURM_DASHBOARD = int(CONFIG.get("dashboard_port"))
 JUPYTER_PORT = int(CONFIG.get("jupyter_port"))
+JUPYTER_REQUIRE_TOKEN = _cast_value(CONFIG.get("jupyter_require_token", False), bool)
 VENV_ACTIVATE = CONFIG.get("venv_activate")
+VENV_MODE = CONFIG.get("venv_mode", "activate")
 DEFAULT_JUPYTER_RUNTIME_BASE = "/tmp/jrt"
 SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
 SCHEDULER_ADDRESS_MAP_FILE = Path().home() / ".dask_scheduler_addresses.json"
@@ -293,6 +347,7 @@ PERSISTED_LAUNCH_FIELDS = [
     "gpu_names",
     "gres",
     "launch_kernels",
+    "jupyter_only",
 ]
 
 
@@ -313,6 +368,7 @@ def _normalize_launch_config(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     elif isinstance(gpu_names, (list, tuple)):
         normalized["gpu_names"] = [str(n).strip() for n in gpu_names if str(n).strip()] or None
     normalized["launch_kernels"] = bool(normalized.get("launch_kernels", False))
+    normalized["jupyter_only"] = bool(normalized.get("jupyter_only", False))
     return normalized
 
 
@@ -411,10 +467,13 @@ def print_launch_summary(config: Dict[str, Any], *, title: str = "📋 LAUNCH SU
     gpu_names = config.get("gpu_names") or []
     gpu_names = config.get("gpu_names") or []
     launch_kernels = bool(config.get("launch_kernels"))
+    jupyter_only = bool(config.get("jupyter_only"))
+    mode = "Jupyter only" if jupyter_only else ("Jupyter + Dask" if launch_kernels else "Dask only")
 
     print("\n" + "=" * 50)
     print(title)
     print("=" * 50)
+    print(f"  Launch mode:       {mode}")
     print(f"  Partition / Queue: {partition_display}")
     print(f"  Walltime:          {walltime}")
     if begin_time:
@@ -430,7 +489,10 @@ def print_launch_summary(config: Dict[str, Any], *, title: str = "📋 LAUNCH SU
     print(f"  GPUs per process:  {num_gpus}")
     if gpu_names:
         print(f"  GPU model filter:  {', '.join(gpu_names)}")
-    print(f"  Launch kernels:    {'Yes' if launch_kernels else 'No'}")
+    venv_display = VENV_ACTIVATE or "None"
+    if VENV_MODE == "pyproject":
+        venv_display += " (pyproject → uv)"
+    print(f"  Venv:              {venv_display}")
     print("=" * 50)
 
 
@@ -580,6 +642,117 @@ def _resolve_venv_paths(venv_activate: Optional[str]) -> Tuple[Optional[str], Op
     return str(venv_root), str(activate_path)
 
 
+def _build_venv_prologue(
+    venv_activate: Optional[str],
+    venv_mode: str = "activate",
+    *,
+    launch_kernels: bool = False,
+    jupyter_port: int = 11833,
+    jupyter_require_token: bool = False,
+    jupyter_foreground: bool = False,
+) -> Tuple[List[str], Optional[str]]:
+    """Build prologue commands and python path for worker job scripts.
+
+    Returns (prologue_lines, python_path).
+    """
+    if not venv_activate:
+        return [], None
+
+    if venv_mode == "pyproject":
+        project_dir = str(Path(venv_activate).expanduser().resolve())
+        extra_pkgs = '"dask[distributed]"'
+        if launch_kernels:
+            extra_pkgs += ' jupyter'
+        install_cmd = f'uv pip install {extra_pkgs} -e "{project_dir}" --python "$VENV_DIR/bin/python"'
+        prologue = [
+            f'export VENV_DIR="$VENV_LOCAL/{Path(project_dir).name}"',
+            'echo "=== slurmcli: creating venv at $VENV_DIR ==="',
+            f'uv venv "$VENV_DIR" || {{ echo "FATAL: uv venv failed"; exit 1; }}',
+            f'echo "=== slurmcli: installing from {project_dir}/pyproject.toml ==="',
+            f'{install_cmd} || {{ echo "FATAL: uv pip install failed"; exit 1; }}',
+            'source "$VENV_DIR/bin/activate"',
+            'echo "=== slurmcli: venv ready, python=$(which python) ==="',
+        ]
+        if launch_kernels:
+            prologue += _jupyter_prologue_lines(jupyter_port, jupyter_require_token, foreground=jupyter_foreground)
+        return prologue, "python"
+
+    # activate mode (existing behavior)
+    venv_root, activate_path = _resolve_venv_paths(venv_activate)
+    prologue = [f"source {activate_path}"] if activate_path else []
+    if launch_kernels:
+        prologue += _jupyter_prologue_lines(jupyter_port, jupyter_require_token, foreground=jupyter_foreground)
+    python_path = str(Path(venv_root) / "bin" / "python") if venv_root else None
+    return prologue, python_path
+
+
+def _jupyter_prologue_lines(port: int, require_token: bool, *, foreground: bool = False) -> List[str]:
+    """Prologue lines to start a jupyter server (background or foreground)."""
+    token_args = f'--ServerApp.token=$_SLURMCLI_JTOKEN --IdentityProvider.token=$_SLURMCLI_JTOKEN' if require_token else \
+        '--ServerApp.token= --ServerApp.password= --ServerApp.disable_check_xsrf=True --IdentityProvider.token='
+    jupyter_cmd = (f'python -m jupyter server --no-browser --ip=0.0.0.0 --port={port}'
+        f' --ServerApp.port_retries=0 --ServerApp.allow_remote_access=True --ServerApp.allow_origin=*'
+        f' {token_args}')
+    token_line = f'export _SLURMCLI_JTOKEN=$(python -c "import uuid; print(uuid.uuid4().hex)")' if require_token else ''
+    ip_line = '_WORKER_IP=$(hostname -I | awk \'{print $1}\')'
+    url_line = (f'echo "=== slurmcli-jupyter: http://${{_WORKER_IP}}:{port}/?token=${{_SLURMCLI_JTOKEN:-}}"' if require_token else
+        f'echo "=== slurmcli-jupyter: http://${{_WORKER_IP}}:{port}/"')
+    if foreground:
+        return [token_line, ip_line, url_line, f'exec {jupyter_cmd}']
+    return [
+        token_line,
+        f'nohup {jupyter_cmd} > /tmp/${{SLURM_JOB_ID}}/jupyter.log 2>&1 &',
+        'sleep 3',
+        ip_line,
+        url_line,
+    ]
+
+
+def _srun_env() -> Dict[str, str]:
+    """Return a copy of os.environ without stale SLURM variables.
+
+    If slurmcli is invoked from inside an existing SLURM job (e.g. an
+    interactive srun session), inherited SLURM_JOB_ID etc. would cause a
+    new ``srun`` to try to run inside that allocation instead of creating
+    a fresh one.
+    """
+    env = os.environ.copy()
+    for key in list(env):
+        if key.startswith("SLURM_"):
+            del env[key]
+    return env
+
+
+def _build_srun_cmd(launch_cfg: Dict[str, Any]) -> List[str]:
+    """Build an srun command from launch config, mirroring sbatch directives."""
+    memory = _normalize_slurm_memory(launch_cfg.get("memory", "32G"))
+    cmd = ['srun', '-J', 'slurmcli-jupyter', '-n', '1',
+           '--cpus-per-task', str(launch_cfg.get("cores_per_process", 16)),
+           '--mem', memory, '-t', launch_cfg.get("walltime", "01:00:00")]
+    if launch_cfg.get("partition"):
+        cmd += ['-p', launch_cfg["partition"]]
+    if launch_cfg.get("nodelist"):
+        cmd += ['--nodelist', launch_cfg["nodelist"]]
+    num_gpus = int(launch_cfg.get("num_gpus") or 0)
+    if num_gpus > 0:
+        cmd += ['--gpus-per-task', str(num_gpus)]
+    return cmd
+
+
+def _build_jupyter_srun_script() -> str:
+    """Build a bash script string for running jupyter via srun.
+
+    Lines are joined with '; ' so each runs independently.  Critical
+    commands already have their own ``|| { exit 1; }`` guards.
+    """
+    prologue, _ = _build_venv_prologue(
+        VENV_ACTIVATE, VENV_MODE,
+        launch_kernels=True, jupyter_port=JUPYTER_PORT, jupyter_require_token=JUPYTER_REQUIRE_TOKEN,
+        jupyter_foreground=True,
+    )
+    return '; '.join(line for line in prologue if line)
+
+
 def _run_squeue(args: List[str]) -> Optional[str]:
     try:
         result = subprocess.run(args, check=True, capture_output=True, text=True, timeout=8)
@@ -588,7 +761,8 @@ def _run_squeue(args: List[str]) -> Optional[str]:
         return None
 
 
-def _get_squeue_rows(partition: Optional[str] = None) -> List[Dict[str, str]]:
+def _get_squeue_rows(partition: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
+    """Returns list of rows on success (possibly empty), or None if squeue failed."""
     base = ["squeue", "-h", "-o", "%i|%P|%T|%Q|%R|%u|%j"]
     if partition:
         base.extend(["-p", partition])
@@ -596,8 +770,8 @@ def _get_squeue_rows(partition: Optional[str] = None) -> List[Dict[str, str]]:
     rows_text = _run_squeue(base + ["--sort=-P"])
     if rows_text is None:
         rows_text = _run_squeue(base)
-    if not rows_text:
-        return []
+    if rows_text is None:
+        return None
 
     rows: List[Dict[str, str]] = []
     for line in rows_text.strip().splitlines():
@@ -664,8 +838,10 @@ def _report_queue_ahead(
     max_rows: int = 20,
 ) -> List[str]:
     rows = _get_squeue_rows(partition=partition)
-    if not rows:
+    if rows is None:
         print("ℹ️ Unable to query squeue for queue status.")
+        return job_ids
+    if not rows:
         return job_ids
 
     job_ids_set = set(job_ids)
@@ -702,6 +878,34 @@ def _report_queue_ahead(
     return job_ids
 
 
+def _tail_slurm_logs(log_dir: str, job_ids: List[str], offsets: Dict[str, int]) -> Dict[str, int]:
+    """Print new content from SLURM log files. Returns updated offsets."""
+    log_path = Path(log_dir)
+    if not log_path.exists():
+        return offsets
+    for job_id in job_ids:
+        for suffix in ("out", "err"):
+            for pattern in (f"*-{job_id}.{suffix}",):
+                for fpath in log_path.glob(pattern):
+                    key = str(fpath)
+                    offset = offsets.get(key, 0)
+                    try:
+                        size = fpath.stat().st_size
+                        if size > offset:
+                            with open(fpath, "r") as f:
+                                f.seek(offset)
+                                new_content = f.read()
+                            if new_content.strip():
+                                label = "stderr" if suffix == "err" else "stdout"
+                                print(f"📄 [{job_id} {label}]")
+                                for line in new_content.rstrip().splitlines():
+                                    print(f"   {line}")
+                            offsets[key] = size
+                    except OSError:
+                        pass
+    return offsets
+
+
 def _wait_for_workers_with_queue(
     client: Client,
     *,
@@ -709,6 +913,7 @@ def _wait_for_workers_with_queue(
     total_workers_expected: int,
     partition: Optional[str],
     job_name: Optional[str],
+    log_dir: str = "dask_logs",
     poll_interval: float = 30.0,
     max_rows: int = 20,
 ) -> None:
@@ -720,11 +925,16 @@ def _wait_for_workers_with_queue(
         max_rows=max_rows,
     )
 
+    log_offsets: Dict[str, int] = {}
+
     while True:
+        log_offsets = _tail_slurm_logs(log_dir, job_ids, log_offsets)
         try:
             client.wait_for_workers(n_workers=total_workers_expected, timeout=poll_interval)
+            log_offsets = _tail_slurm_logs(log_dir, job_ids, log_offsets)
             return
         except TimeoutError:
+            log_offsets = _tail_slurm_logs(log_dir, job_ids, log_offsets)
             job_ids = _report_queue_ahead(
                 job_ids,
                 partition=partition,
@@ -732,6 +942,7 @@ def _wait_for_workers_with_queue(
                 max_rows=max_rows,
             )
         except Exception as exc:
+            log_offsets = _tail_slurm_logs(log_dir, job_ids, log_offsets)
             print(f"⚠️ Error while waiting for workers ({type(exc).__name__}: {exc})")
             return
 
@@ -761,6 +972,8 @@ def get_cluster(
     log_dir: str = "dask_logs",
     job_name: str = "tfl",
     venv_activate: Optional[str] = VENV_ACTIVATE,
+    venv_mode: str = VENV_MODE,
+    launch_kernels: bool = False,
     nodelist: Optional[str] = None,
     gres: Optional[str] = None,
     gpu_names: Optional[Iterable[str]] = None,
@@ -828,10 +1041,10 @@ def get_cluster(
         print(f"🚀 Submitting {num_jobs} jobs to {queue_label}…")
         memory = _normalize_slurm_memory(memory)
         os.makedirs(log_dir, exist_ok=True)
-        prologue: List[str] = []
-        venv_root, activate_path = _resolve_venv_paths(venv_activate)
-        if activate_path:
-            prologue.append(f"source {activate_path}")
+        prologue, venv_python = _build_venv_prologue(
+            venv_activate, venv_mode,
+            launch_kernels=launch_kernels, jupyter_port=JUPYTER_PORT, jupyter_require_token=JUPYTER_REQUIRE_TOKEN,
+        )
 
         job_extra_directives: List[str] = []
         worker_extra_args: List[str] = []
@@ -870,8 +1083,8 @@ def get_cluster(
             worker_extra_args=worker_extra_args,
             scheduler_options=scheduler_options,
         )
-        if venv_root:
-            cluster_kwargs["python"] = str(Path(venv_root) / "bin" / "python")
+        if venv_python:
+            cluster_kwargs["python"] = venv_python
         cluster = SLURMCluster(**cluster_kwargs)
         try:
             job_script = cluster.job_script()
@@ -907,6 +1120,7 @@ def get_cluster(
                 total_workers_expected=total_workers_expected,
                 partition=queue,
                 job_name=job_name,
+                log_dir=log_dir,
                 poll_interval=queue_poll_interval,
                 max_rows=queue_report_max,
             )
@@ -998,6 +1212,7 @@ def start_jupyter_server_on_worker(
     jupyter_exe: Optional[str] = None,
     token: Optional[str] = None,
     allow_origin: str = "*",
+    require_token: bool = True,
 ):
     import glob
     import json
@@ -1019,7 +1234,7 @@ def start_jupyter_server_on_worker(
         worker = None
         worker_meta = {"name": None, "address": None}
 
-    token = token or uuid.uuid4().hex
+    token = token or uuid.uuid4().hex if require_token else None
     runtime_dir = os.path.join(runtime_dir_base, f"worker-{os.getpid()}")
     os.makedirs(runtime_dir, exist_ok=True)
 
@@ -1029,10 +1244,23 @@ def start_jupyter_server_on_worker(
 
     cmd += [
         "--no-browser", "--ip=0.0.0.0", port_arg,
-        "--ServerApp.port_retries=0", f"--ServerApp.token={token}",
+        "--ServerApp.port_retries=0",
         "--ServerApp.allow_remote_access=True", f"--ServerApp.allow_origin={allow_origin}",
         f"--ServerApp.runtime_dir={runtime_dir}",
     ]
+
+    if require_token:
+        cmd += [
+            f"--ServerApp.token={token}",
+            f"--IdentityProvider.token={token}",  # Jupyter Server 2.x
+        ]
+    else:
+        cmd += [
+            "--ServerApp.token=",  # Empty = no auth (for VSCode compatibility)
+            "--ServerApp.password=",
+            "--ServerApp.disable_check_xsrf=True",
+            "--IdentityProvider.token=",
+        ]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, encoding="utf-8", env=env)
 
@@ -1060,11 +1288,10 @@ def start_jupyter_server_on_worker(
             if m:
                 candidate = m.group(1)
                 parsed = urlparse(candidate)
-                qs = dict(parse_qsl(parsed.query, keep_blank_values=True)); qs["token"] = token
                 host_ip = _worker_host_ip(); port_part = f":{parsed.port}" if parsed.port else ""
                 netloc = f"{host_ip}{port_part}" if parsed.hostname in {"127.0.0.1", "localhost"} else parsed.netloc
-                new_query = urlencode(qs)
-                parsed = parsed._replace(netloc=netloc, query=new_query)
+                query = urlencode({"token": token}) if require_token else ""
+                parsed = parsed._replace(netloc=netloc, query=query)
                 url = urlunparse(parsed); parsed_url = parsed
                 break
         if proc.poll() is not None:
@@ -1083,13 +1310,14 @@ def start_jupyter_server_on_worker(
                 data = json.loads(files[0].read_text("utf-8"))
                 candidate = data.get("url") or data.get("base_url")
                 if candidate:
-                    from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+                    from urllib.parse import urlparse, urlunparse, urlencode
                     parsed = urlparse(candidate)
                     host_ip = _worker_host_ip()
                     port_part = f":{parsed.port}" if parsed.port else ""
                     netloc = f"{host_ip}{port_part}" if parsed.hostname in {"127.0.0.1", "localhost"} else parsed.netloc
-                    qs = dict(parse_qsl(parsed.query, keep_blank_values=True)); qs.setdefault("token", data.get("token", token))
-                    parsed = parsed._replace(netloc=netloc, query=urlencode(qs))
+                    fallback_token = data.get("token", token) if require_token else None
+                    query = urlencode({"token": fallback_token}) if require_token else ""
+                    parsed = parsed._replace(netloc=netloc, query=query)
                     url = urlunparse(parsed); parsed_url = parsed
             except Exception as exc:
                 captured.append(f"[runtime-json-error] {exc}")
@@ -1154,6 +1382,7 @@ def execute_launch(
     if not gres and num_gpus > 0:
         gres = f"gpu:{num_gpus}"
     launch_kernels = bool(launch_cfg.get("launch_kernels"))
+    jupyter_only = bool(launch_cfg.get("jupyter_only"))
 
     launch_cfg.update(
         {
@@ -1170,6 +1399,7 @@ def execute_launch(
             "gpu_names": gpu_names,
             "gres": gres,
             "launch_kernels": launch_kernels,
+            "jupyter_only": jupyter_only,
         }
     )
 
@@ -1184,8 +1414,36 @@ def execute_launch(
 
     save_last_launch_config(launch_cfg)
 
+    if jupyter_only:
+        _execute_jupyter_only(launch_cfg, verbosity)
+    else:
+        _execute_dask_launch(launch_cfg, verbosity)
+
+
+def _execute_jupyter_only(launch_cfg: Dict[str, Any], verbosity: int) -> None:
+    """Launch a Jupyter server via srun (foreground, no Dask)."""
+    script = _build_jupyter_srun_script()
+    srun_cmd = _build_srun_cmd(launch_cfg) + ['bash', '-c', script]
+    print(f"\n$ {' '.join(srun_cmd)}\n")
+    subprocess.run(srun_cmd, env=_srun_env())
+
+
+def _execute_dask_launch(launch_cfg: Dict[str, Any], verbosity: int) -> None:
+    """Standard Dask cluster launch."""
+    num_jobs = launch_cfg["num_jobs"]
+    processes = launch_cfg["processes"]
+    threads_per_worker = launch_cfg["threads_per_worker"]
+    cores_per_process = launch_cfg["cores_per_process"]
+    memory = launch_cfg["memory"]
+    walltime = launch_cfg["walltime"]
+    selected_partition = launch_cfg.get("partition")
+    begin_time = launch_cfg.get("begin_time")
+    nodelist = launch_cfg.get("nodelist")
+    gres = launch_cfg.get("gres")
+    gpu_names = launch_cfg.get("gpu_names")
+    launch_kernels = launch_cfg.get("launch_kernels", False)
+
     cluster = client = None
-    started_jupyter_servers: List[Dict[str, Any]] = []
     try:
         cluster, client = get_cluster(
             local=False,
@@ -1200,6 +1458,7 @@ def execute_launch(
             nodelist=nodelist,
             gres=gres,
             gpu_names=gpu_names,
+            launch_kernels=False,
             verbose=verbosity,
             print_job_script=True,
         )
@@ -1212,64 +1471,22 @@ def execute_launch(
             pass
 
         if launch_kernels:
-            print("\n🔌 Starting a Jupyter server on each worker via Dask…")
-            worker_infos = client.scheduler_info().get("workers", {})
-            worker_addresses = list(worker_infos.keys())
-            if not worker_addresses:
-                print("⚠️  No workers available to launch Jupyter kernels.")
-            else:
-                session_tag = uuid.uuid4().hex[:8]
-                for idx, worker_addr in enumerate(worker_addresses):
-                    worker_port = JUPYTER_PORT + idx if JUPYTER_PORT is not None else None
-                    runtime_base = os.path.join(DEFAULT_JUPYTER_RUNTIME_BASE, f"session-{session_tag}", f"worker-{idx}")
-                    future = client.submit(
-                        start_jupyter_server_on_worker,
-                        port=worker_port,
-                        runtime_dir_base=runtime_base,
-                        timeout=60.0,
-                        pure=False,
-                        workers=[worker_addr],
-                        allow_other_workers=False,
-                    )
-                    try:
-                        info = future.result(timeout=180)
-                    except Exception as exc:
-                        print(f"❌ Worker {worker_addr}: exception while starting Jupyter -> {exc}")
-                        continue
-
-                    if info.get("status") == "ok" and info.get("url"):
-                        host_display = info.get("host") or worker_addr
-                        print(f"✅ Worker {worker_addr} ({host_display})")
-                        print(f"   PID: {info.get('pid')} | URL: {info.get('url')}")
-                        started_jupyter_servers.append({"worker": worker_addr, "pid": info.get("pid")})
-                    else:
-                        print(f"❌ Worker {worker_addr}: {info.get('error', 'failed to start Jupyter')}")
-                        log_tail = info.get("log_tail") or []
-                        if log_tail:
-                            print("   Log tail:")
-                            for line in log_tail[-10:]:
-                                print(f"   {line}")
-
-        while True:
-            time.sleep(3600)
+            script = _build_jupyter_srun_script()
+            srun_cmd = _build_srun_cmd(launch_cfg) + ['bash', '-c', script]
+            print(f"\n$ {' '.join(srun_cmd)}\n")
+            subprocess.run(srun_cmd, env=_srun_env())
+        else:
+            while True:
+                time.sleep(3600)
 
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupt received. Shutting down…")
     except Exception as e:
+        import traceback
         print(f"\n💥 Error during cluster setup: {e}")
+        traceback.print_exc()
     finally:
         print("\n🛑 Shutting down cluster and client…")
-        if client and started_jupyter_servers:
-            print("🧹 Stopping remote Jupyter servers…")
-            for entry in started_jupyter_servers:
-                worker, pid = entry.get("worker"), entry.get("pid")
-                try:
-                    fut = client.submit(stop_jupyter_server_on_worker, pid, pure=False, workers=[worker], allow_other_workers=False)
-                    res = fut.result(timeout=15)
-                    status = res.get("status")
-                except Exception as exc:
-                    status = f"error: {exc}"
-                print(f"   Worker {worker or 'unknown'} pid {pid}: {status}")
         if client:
             try:
                 client.close()
@@ -1461,8 +1678,9 @@ def main_interactive(verbosity: int) -> None:
     else:
         print("\n✅ Using SLURM's default partition (no explicit queue).")
 
-    launch_kernels_choice = input("\n🧪 Start a Jupyter server on each worker after launch? (y/n): ").strip().lower()
-    launch_kernels = launch_kernels_choice == 'y'
+    jupyter_choice = input("\n🧪 Launch mode: [n]o jupyter, [j]upyter + dask workers, jupyter [o]nly (no dask)? (n/j/o): ").strip().lower()
+    launch_kernels = jupyter_choice in ('j', 'o')
+    jupyter_only = jupyter_choice == 'o'
     if launch_kernels:
         print(
             "\nℹ️  Defaults updated for interactive Jupyter use:\n"
@@ -1615,6 +1833,7 @@ def main_interactive(verbosity: int) -> None:
         "gpu_names": gpu_names,
         "gres": gres,
         "launch_kernels": launch_kernels,
+        "jupyter_only": jupyter_only,
     }
     execute_launch(launch_config, verbosity, prompt_to_save=True)
 

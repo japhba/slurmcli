@@ -650,6 +650,7 @@ def _build_venv_prologue(
     jupyter_port: int = 11833,
     jupyter_require_token: bool = False,
     jupyter_foreground: bool = False,
+    recreate_venv: bool = False,
 ) -> Tuple[List[str], Optional[str]]:
     """Build prologue commands and python path for worker job scripts.
 
@@ -660,17 +661,16 @@ def _build_venv_prologue(
 
     if venv_mode == "pyproject":
         project_dir = str(Path(venv_activate).expanduser().resolve())
-        extra_pkgs = '"dask[distributed]"'
-        if launch_kernels:
-            extra_pkgs += ' jupyter'
-        install_cmd = f'uv pip install {extra_pkgs} -e "{project_dir}" --python "$VENV_DIR/bin/python"'
         prologue = [
-            f'export VENV_DIR="$VENV_LOCAL/{Path(project_dir).name}"',
-            'echo "=== slurmcli: creating venv at $VENV_DIR ==="',
-            f'uv venv "$VENV_DIR" || {{ echo "FATAL: uv venv failed"; exit 1; }}',
-            f'echo "=== slurmcli: installing from {project_dir}/pyproject.toml ==="',
-            f'{install_cmd} || {{ echo "FATAL: uv pip install failed"; exit 1; }}',
-            'source "$VENV_DIR/bin/activate"',
+            f'cd "{project_dir}"',
+            f'export UV_PROJECT_ENVIRONMENT="$VENV_LOCAL/${{PWD##*/}}"',
+        ]
+        if recreate_venv:
+            prologue.append('echo "=== slurmcli: removing $UV_PROJECT_ENVIRONMENT ==="; rm -rf "$UV_PROJECT_ENVIRONMENT"')
+        prologue += [
+            'echo "=== slurmcli: uv sync → $UV_PROJECT_ENVIRONMENT ==="',
+            'uv sync || { echo "FATAL: uv sync failed"; exit 1; }',
+            'source "$UV_PROJECT_ENVIRONMENT/bin/activate"',
             'echo "=== slurmcli: venv ready, python=$(which python) ==="',
         ]
         if launch_kernels:
@@ -739,7 +739,7 @@ def _build_srun_cmd(launch_cfg: Dict[str, Any]) -> List[str]:
     return cmd
 
 
-def _build_jupyter_srun_script() -> str:
+def _build_jupyter_srun_script(*, recreate_venv: bool = False) -> str:
     """Build a bash script string for running jupyter via srun.
 
     Lines are joined with '; ' so each runs independently.  Critical
@@ -748,7 +748,7 @@ def _build_jupyter_srun_script() -> str:
     prologue, _ = _build_venv_prologue(
         VENV_ACTIVATE, VENV_MODE,
         launch_kernels=True, jupyter_port=JUPYTER_PORT, jupyter_require_token=JUPYTER_REQUIRE_TOKEN,
-        jupyter_foreground=True,
+        jupyter_foreground=True, recreate_venv=recreate_venv,
     )
     return '; '.join(line for line in prologue if line)
 
@@ -1404,6 +1404,16 @@ def execute_launch(
     )
 
     print_launch_summary(launch_cfg)
+    if VENV_MODE == "pyproject":
+        project_dir = str(Path(VENV_ACTIVATE).expanduser().resolve())
+        venv_name = Path(project_dir).name
+        print(f"\n📂 uv sync will run in: {project_dir}")
+        print(f"   venv: $VENV_LOCAL/{venv_name}")
+        if input("   Is this the correct project directory? (y/n): ").lower() != 'y':
+            print("🚫 Launch aborted.")
+            return
+        if input("   Recreate venv from scratch? (y/N): ").strip().lower() == 'y':
+            launch_cfg["_recreate_venv"] = True
     if require_confirmation:
         if input("Proceed with launch? (y/n): ").lower() != 'y':
             print("🚫 Launch aborted.")
@@ -1422,7 +1432,7 @@ def execute_launch(
 
 def _execute_jupyter_only(launch_cfg: Dict[str, Any], verbosity: int) -> None:
     """Launch a Jupyter server via srun (foreground, no Dask)."""
-    script = _build_jupyter_srun_script()
+    script = _build_jupyter_srun_script(recreate_venv=bool(launch_cfg.get("_recreate_venv")))
     srun_cmd = _build_srun_cmd(launch_cfg) + ['bash', '-c', script]
     print(f"\n$ {' '.join(srun_cmd)}\n")
     subprocess.run(srun_cmd, env=_srun_env())
@@ -1471,7 +1481,7 @@ def _execute_dask_launch(launch_cfg: Dict[str, Any], verbosity: int) -> None:
             pass
 
         if launch_kernels:
-            script = _build_jupyter_srun_script()
+            script = _build_jupyter_srun_script(recreate_venv=bool(launch_cfg.get("_recreate_venv")))
             srun_cmd = _build_srun_cmd(launch_cfg) + ['bash', '-c', script]
             print(f"\n$ {' '.join(srun_cmd)}\n")
             subprocess.run(srun_cmd, env=_srun_env())

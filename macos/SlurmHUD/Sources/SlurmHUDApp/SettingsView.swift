@@ -27,7 +27,7 @@ struct SettingsView: View {
             }
         }
         .padding(16)
-        .frame(width: 360)
+        .frame(minWidth: 300, idealWidth: 400)
         .onAppear {
             syncFromStore()
         }

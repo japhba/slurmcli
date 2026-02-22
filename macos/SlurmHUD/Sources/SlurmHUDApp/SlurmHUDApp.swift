@@ -6,12 +6,12 @@ struct SlurmHUDApp: App {
     @StateObject private var fetcher = StatusFetcher()
 
     var body: some Scene {
-        MenuBarExtra("SlurmHUD", systemImage: "chart.bar.xaxis") {
+        WindowGroup {
             StatusView()
                 .environmentObject(configStore)
                 .environmentObject(fetcher)
         }
-        .menuBarExtraStyle(.window)
+        .defaultSize(width: 900, height: 600)
 
         Settings {
             SettingsView()

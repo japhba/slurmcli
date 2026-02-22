@@ -10,7 +10,7 @@ struct SlurmHUDConfig: Codable {
         host: "mycluster",
         refreshSeconds: 600,
         timeoutSeconds: 10,
-        command: "slurmcli-status -vv"
+        command: "slurmcli-status -vvvv"
     )
 }
 

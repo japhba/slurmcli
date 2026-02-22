@@ -43,9 +43,12 @@ struct NodeDetail: Codable, Identifiable {
     var id: String { node ?? UUID().uuidString }
 }
 
-struct JobDetail: Codable {
+struct JobDetail: Codable, Identifiable {
+    let id: Int?
     let name: String?
     let user: String?
+    let elapsed: String?
+    let time_left: String?
     let time_info: String?
     let resource_summary: String?
 }

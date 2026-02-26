@@ -318,6 +318,9 @@ JUPYTER_PORT = int(CONFIG.get("jupyter_port"))
 JUPYTER_REQUIRE_TOKEN = _cast_value(CONFIG.get("jupyter_require_token", False), bool)
 VENV_ACTIVATE = CONFIG.get("venv_activate")
 VENV_MODE = CONFIG.get("venv_mode", "activate")
+if VENV_MODE == "pyproject":
+    # Default to CWD so workers sync the calling project, not a stale config value.
+    VENV_ACTIVATE = str(Path.cwd())
 DEFAULT_JUPYTER_RUNTIME_BASE = "/tmp/jrt"
 SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
 SCHEDULER_ADDRESS_MAP_FILE = Path().home() / ".dask_scheduler_addresses.json"
@@ -612,6 +615,29 @@ def _record_scheduler_address(address: str, cluster_type: Optional[str], cluster
         pass
 
 
+def _resolve_gpu_nodelist(gpu_types: List[str], *, partition: Optional[str] = None) -> List[str]:
+    """Return node names whose GRES contains any of the requested GPU types."""
+    from slurmcli.slurm_parser import extract_gpu_labels
+    cmd = "sinfo -h -o '%N|%G'"
+    if partition:
+        cmd += f" -p {partition}"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=8)
+    nodes: List[str] = []
+    seen: set[str] = set()
+    for line in result.stdout.strip().splitlines():
+        if '|' not in line:
+            continue
+        nodelist_str, gres = line.split('|', 1)
+        labels = [l.lower() for l in extract_gpu_labels(gres)]
+        if any(g in labels for g in gpu_types):
+            from slurmcli.cluster_status import expand_nodelist
+            for n in expand_nodelist(nodelist_str.strip()):
+                if n not in seen:
+                    seen.add(n)
+                    nodes.append(n)
+    return nodes
+
+
 def _normalize_slurm_memory(memory: str) -> str:
     text = (memory or "").strip()
     if not text:
@@ -661,9 +687,10 @@ def _build_venv_prologue(
 
     if venv_mode == "pyproject":
         project_dir = str(Path(venv_activate).expanduser().resolve())
+        venv_local = os.environ["VENV_LOCAL"]
         prologue = [
             f'cd "{project_dir}"',
-            f'export UV_PROJECT_ENVIRONMENT="$VENV_LOCAL/${{PWD##*/}}"',
+            f'export UV_PROJECT_ENVIRONMENT="{venv_local}/${{PWD##*/}}"',
         ]
         if recreate_venv:
             prologue.append('echo "=== slurmcli: removing $UV_PROJECT_ENVIRONMENT ==="; rm -rf "$UV_PROJECT_ENVIRONMENT"')
@@ -691,7 +718,7 @@ def _jupyter_prologue_lines(port: int, require_token: bool, *, foreground: bool 
     token_args = f'--ServerApp.token=$_SLURMCLI_JTOKEN --IdentityProvider.token=$_SLURMCLI_JTOKEN' if require_token else \
         '--ServerApp.token= --ServerApp.password= --ServerApp.disable_check_xsrf=True --IdentityProvider.token='
     jupyter_cmd = (f'python -m jupyter server --no-browser --ip=0.0.0.0 --port={port}'
-        f' --ServerApp.port_retries=0 --ServerApp.allow_remote_access=True --ServerApp.allow_origin=*'
+        f' --ServerApp.port_retries=50 --ServerApp.allow_remote_access=True --ServerApp.allow_origin=*'
         f' {token_args}')
     token_line = f'export _SLURMCLI_JTOKEN=$(python -c "import uuid; print(uuid.uuid4().hex)")' if require_token else ''
     ip_line = '_WORKER_IP=$(hostname -I | awk \'{print $1}\')'
@@ -699,12 +726,14 @@ def _jupyter_prologue_lines(port: int, require_token: bool, *, foreground: bool 
         f'echo "=== slurmcli-jupyter: http://${{_WORKER_IP}}:{port}/"')
     if foreground:
         return [token_line, ip_line, url_line, f'exec {jupyter_cmd}']
+    log_file = '/tmp/${SLURM_JOB_ID}/jupyter.log'
+    extract_url = (f'_JURL=$(grep -oP "https?://[^\\s,;]+" {log_file} | head -1)'
+        f' && [ -n "$_JURL" ] && echo "=== slurmcli-jupyter: $_JURL" || {{ {ip_line}; {url_line}; }}')
     return [
         token_line,
-        f'nohup {jupyter_cmd} > /tmp/${{SLURM_JOB_ID}}/jupyter.log 2>&1 &',
+        f'nohup {jupyter_cmd} > {log_file} 2>&1 &',
         'sleep 3',
-        ip_line,
-        url_line,
+        extract_url,
     ]
 
 
@@ -763,7 +792,7 @@ def _run_squeue(args: List[str]) -> Optional[str]:
 
 def _get_squeue_rows(partition: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
     """Returns list of rows on success (possibly empty), or None if squeue failed."""
-    base = ["squeue", "-h", "-o", "%i|%P|%T|%Q|%R|%u|%j"]
+    base = ["squeue", "--all", "-h", "-o", "%i|%P|%T|%Q|%R|%u|%j"]
     if partition:
         base.extend(["-p", partition])
 
@@ -1053,10 +1082,18 @@ def get_cluster(
         if nodelist:
             job_extra_directives.append(f"--nodelist={nodelist}")
         if gpu_names:
-            gpu_list = [str(name).strip() for name in gpu_names if str(name).strip()]
+            gpu_list = [str(name).strip().lower() for name in gpu_names if str(name).strip()]
             if gpu_list:
-                constraint = "|".join(gpu_list)
-                job_extra_directives.append(f"--constraint={constraint}")
+                matching_nodes = _resolve_gpu_nodelist(gpu_list, partition=queue)
+                if matching_nodes:
+                    gpu_nodelist = ",".join(matching_nodes)
+                    if nodelist:
+                        job_extra_directives.append(f"--nodelist={nodelist},{gpu_nodelist}")
+                    else:
+                        job_extra_directives.append(f"--nodelist={gpu_nodelist}")
+                    print(f"✅ GPU filter {gpu_list} → {len(matching_nodes)} node(s): {gpu_nodelist}")
+                else:
+                    print(f"⚠️ No nodes found with GPU type(s) {gpu_list} in partition '{queue}'; submitting without node filter.")
         if gres and 'gpu' in (gres or ""):
             try:
                 num_gpus = int(gres.split(':')[-1])
@@ -1244,7 +1281,7 @@ def start_jupyter_server_on_worker(
 
     cmd += [
         "--no-browser", "--ip=0.0.0.0", port_arg,
-        "--ServerApp.port_retries=0",
+        "--ServerApp.port_retries=50",
         "--ServerApp.allow_remote_access=True", f"--ServerApp.allow_origin={allow_origin}",
         f"--ServerApp.runtime_dir={runtime_dir}",
     ]
@@ -1738,8 +1775,10 @@ def main_interactive(verbosity: int) -> None:
             print(f"{'Idx':<5} {'Node':<22} {'State':<10} {'Memory':<12} {'CPUs (used/total)':<20} {'GPUs (used/total)':<22} {'Users':<7}")
             print("-" * 120)
 
+            sorted_info = sorted(nodes_info_part, key=lambda x: x['state'] + str(x.get('cpus_total') or 0))
             available_for_selection: List[Tuple[int, str]] = []
-            for idx, i in enumerate(sorted(nodes_info_part, key=lambda x: x['state'] + str(x.get('cpus_total') or 0)), start=1):
+            for idx, i in enumerate(sorted_info, start=1):
+                node_name = i['node']
                 mem_str = f"{int(i['memory_gb'] or 0):.0f}GB" if i['memory_gb'] is not None else "N/A"
                 cpu_str = f"{i['cpus_alloc'] or 0}/{i['cpus_total'] or 'N/A'}"
                 gpu_str = f"{i['gpus_in_use']}/{i['gpus_total']}"
@@ -1751,7 +1790,7 @@ def main_interactive(verbosity: int) -> None:
                 is_available = i['state'] in {'idle', 'mixed', 'mix'}
                 marker = "✅" if is_available else " "
                 user_count = len(i.get('users', []))
-                print(f"{idx:<5} {marker} {nodes_in_part[idx-1]:<20} {i['state']:<10} {mem_str:<12} {cpu_str:<20} {gpu_str:<22} {user_count:<7}")
+                print(f"{idx:<5} {marker} {node_name:<20} {i['state']:<10} {mem_str:<12} {cpu_str:<20} {gpu_str:<22} {user_count:<7}")
                 detail_indent = " " * 8
                 if verbosity >= 2:
                     job_records = [rec for rec in (i.get('job_records') or []) if isinstance(rec, dict)]
@@ -1790,7 +1829,7 @@ def main_interactive(verbosity: int) -> None:
                     if users_list:
                         print(f"{detail_indent}users: {', '.join(users_list)}")
                 if is_available:
-                    available_for_selection.append((idx, nodes_in_part[idx-1]))
+                    available_for_selection.append((idx, node_name))
 
             print("=" * 120)
             print(f"✓ = Available for job submission ({len(available_for_selection)} nodes)\n")
@@ -1799,11 +1838,12 @@ def main_interactive(verbosity: int) -> None:
             if nodelist_choice:
                 choices = [c.strip() for c in nodelist_choice.split(",") if c.strip()]
                 selected_nodes: List[str] = []
+                sorted_node_names = [si['node'] for si in sorted_info]
                 for choice in choices:
                     if choice.isdigit():
                         nidx = int(choice)
-                        if 1 <= nidx <= len(nodes_in_part):
-                            selected_nodes.append(nodes_in_part[nidx - 1])
+                        if 1 <= nidx <= len(sorted_node_names):
+                            selected_nodes.append(sorted_node_names[nidx - 1])
                         else:
                             print(f"⚠️  Invalid index '{choice}'; skipping.")
                     else:

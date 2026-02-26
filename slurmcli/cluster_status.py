@@ -6,6 +6,13 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from slurmcli.slurm_parser import (
+    build_node_info,
+    extract_gpu_labels,
+    extract_gpu_total,
+    parse_scontrol_output,
+)
+
 
 # --- Helper parsers for status data ------------------------------------------
 
@@ -51,56 +58,9 @@ def expand_nodelist(nodelist: Optional[str]) -> List[str]:
         return [nodelist]
 
 
-def extract_gpu_total(gres_value: Optional[str]) -> int:
-    if not gres_value:
-        return 0
-    gres_value = gres_value.strip()
-    if not gres_value or gres_value in {"(null)", "N/A", "none"}:
-        return 0
-    total = 0
-    for entry in gres_value.split(','):
-        entry = entry.strip()
-        if "gpu" not in entry.lower():
-            continue
-        entry_core = entry.split('(', 1)[0]
-        parts = [part for part in entry_core.split(':') if part]
-        for part in reversed(parts):
-            m = re.search(r"(\d+)$", part)
-            if m:
-                total += int(m.group(1))
-                break
-    return total
 
+# extract_gpu_total and extract_gpu_labels are imported from slurm_parser
 
-def extract_gpu_labels(gres_value: Optional[str]) -> List[str]:
-    labels: List[str] = []
-    if not gres_value:
-        return labels
-
-    seen: set[str] = set()
-    for raw_entry in gres_value.split(','):
-        entry = raw_entry.strip()
-        if not entry:
-            continue
-        if "gpu" not in entry.lower():
-            continue
-        entry_core = entry.split('(', 1)[0]
-        parts = [part for part in entry_core.split(':') if part]
-        if parts and parts[0].lower() == "gpu":
-            parts = parts[1:]
-        if not parts:
-            continue
-        if parts and re.fullmatch(r'\d+', parts[-1]):
-            parts = parts[:-1]
-        label = ':'.join(parts).strip()
-        if not label:
-            label = "GPU"
-        key = label.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        labels.append(label)
-    return labels
 
 
 def format_gpu_labels(labels: Iterable[str]) -> str:
@@ -264,7 +224,7 @@ def get_jobs_by_node() -> Dict[str, List[Dict[str, Any]]]:
     try:
         # %i jobid, %u user, %j jobname, %M elapsed, %L time-left, %N nodelist
         result = subprocess.run(
-            "squeue -h -o '%i|%u|%j|%M|%L|%N'",
+            "squeue --all -h -o '%i|%u|%j|%M|%L|%N'",
             shell=True,
             check=True,
             capture_output=True,
@@ -306,7 +266,7 @@ def get_jobs_by_node() -> Dict[str, List[Dict[str, Any]]]:
 def get_node_user_map() -> Dict[str, set]:
     try:
         result = subprocess.run(
-            "squeue -h -o '%u|%N'",
+            "squeue --all -h -o '%u|%N'",
             shell=True,
             check=True,
             capture_output=True,
@@ -337,7 +297,7 @@ def get_node_user_map() -> Dict[str, set]:
 def query_users_for_node(node: str) -> List[str]:
     try:
         result = subprocess.run(
-            ["squeue", "-h", "-w", node, "-o", "%u"],
+            ["squeue", "--all", "-h", "-w", node, "-o", "%u"],
             check=True,
             capture_output=True,
             text=True,
@@ -363,75 +323,8 @@ def get_detailed_node_info(
         try:
             cmd = f"scontrol show node {node}"
             result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True, timeout=8)
-            output = result.stdout
-
-            info = {
-                'memory_gb': None,
-                'cpus_total': None,
-                'cpus_alloc': None,
-                'cpu_arch': None,
-                'gpus': '0',
-                'gpus_total': 0,
-                'gpus_in_use': 0,
-                'gpu_labels': [],
-                'state': 'unknown',
-                'users': [],
-                'user_count': 0,
-                'jobs': [],
-            }
-
-            for line in output.split('\n'):
-                if 'RealMemory=' in line:
-                    for part in line.split():
-                        if part.startswith('RealMemory='):
-                            try:
-                                mem_mb = int(part.split('=')[1])
-                                info['memory_gb'] = mem_mb / 1024
-                            except Exception:
-                                pass
-                if 'CPUTot=' in line:
-                    for part in line.split():
-                        if part.startswith('CPUTot='):
-                            try:
-                                info['cpus_total'] = int(part.split('=')[1])
-                            except Exception:
-                                pass
-                        if part.startswith('CPUAlloc='):
-                            try:
-                                info['cpus_alloc'] = int(part.split('=')[1])
-                            except Exception:
-                                pass
-                if 'Arch=' in line or 'Architecture=' in line:
-                    for part in line.split():
-                        if part.startswith('Arch='):
-                            info['cpu_arch'] = part.split('=', 1)[1]
-                        if part.startswith('Architecture='):
-                            info['cpu_arch'] = part.split('=', 1)[1]
-                if 'Gres=' in line:
-                    for part in line.split():
-                        if part.startswith('Gres='):
-                            gres = part.split('=', 1)[1]
-                            info['gpus'] = gres
-                            info['gpus_total'] = extract_gpu_total(gres)
-                            info['gpu_labels'] = extract_gpu_labels(gres)
-                if 'GresUsed=' in line:
-                    for part in line.split():
-                        if part.startswith('GresUsed='):
-                            gres_used = part.split('=', 1)[1]
-                            info['gpus_in_use'] = extract_gpu_total(gres_used)
-                            break
-                if info['gpus_in_use'] == 0 and 'AllocTRES=' in line:
-                    for part in line.split():
-                        if part.startswith('AllocTRES='):
-                            tres = part.split('=', 1)[1]
-                            m = re.search(r'gres/gpu=(\d+)', tres)
-                            if m:
-                                info['gpus_in_use'] = int(m.group(1))
-                            break
-                if 'State=' in line:
-                    for part in line.split():
-                        if part.startswith('State='):
-                            info['state'] = part.split('=')[1].split('+')[0].lower()
+            fields = parse_scontrol_output(result.stdout)
+            info = build_node_info(fields, node)
 
             if include_jobs:
                 users = sorted(node_users_map.get(node, set()))

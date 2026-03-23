@@ -319,8 +319,25 @@ JUPYTER_REQUIRE_TOKEN = _cast_value(CONFIG.get("jupyter_require_token", False), 
 VENV_ACTIVATE = CONFIG.get("venv_activate")
 VENV_MODE = CONFIG.get("venv_mode", "activate")
 if VENV_MODE == "pyproject":
-    # Default to CWD so workers sync the calling project, not a stale config value.
-    VENV_ACTIVATE = str(Path.cwd())
+    # Infer project dir from the active venv's editable installs.
+    # Convention: UV_PROJECT_ENVIRONMENT="$VENV_LOCAL/${PWD##*/}" means the venv
+    # basename matches the project directory basename. We look up the project path
+    # from the editable install's direct_url.json metadata (written by uv/pip on
+    # `uv sync` / `pip install -e`), which records the source directory as a file:// URL.
+    # Falls back to CWD if detection fails.
+    def _infer_project_dir_from_venv() -> Optional[str]:
+        import sys, json
+        site_packages = Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+        for p in site_packages.glob("*.dist-info/direct_url.json"):
+            data = json.loads(p.read_text())
+            if data.get("dir_info", {}).get("editable"):
+                url = data.get("url", "")
+                if url.startswith("file://"):
+                    candidate = Path(url.removeprefix("file://"))
+                    if (candidate / "pyproject.toml").exists():
+                        return str(candidate)
+        return None
+    VENV_ACTIVATE = _infer_project_dir_from_venv() or str(Path.cwd())
 DEFAULT_JUPYTER_RUNTIME_BASE = "/tmp/jrt"
 SCHEDULER_ADDRESS_FILE = Path().home() / ".dask_scheduler_address"
 SCHEDULER_ADDRESS_MAP_FILE = Path().home() / ".dask_scheduler_addresses.json"
@@ -636,6 +653,102 @@ def _resolve_gpu_nodelist(gpu_types: List[str], *, partition: Optional[str] = No
                     seen.add(n)
                     nodes.append(n)
     return nodes
+
+
+def _get_node_gpu_labels() -> Dict[str, str]:
+    """Return {hostname: gpu_label} by parsing sinfo GRES, e.g. 'gpu-sr675-31': 'l40s'."""
+    from slurmcli.slurm_parser import extract_gpu_labels
+    from slurmcli.cluster_status import expand_nodelist
+    try:
+        result = subprocess.run(["sinfo", "-h", "-o", "%N|%G"], capture_output=True, text=True, timeout=8)
+        if result.returncode != 0:
+            return {}
+    except Exception:
+        return {}
+    mapping: Dict[str, str] = {}
+    for line in result.stdout.strip().splitlines():
+        if "|" not in line:
+            continue
+        node_str, gres = line.split("|", 1)
+        labels = extract_gpu_labels(gres)
+        label = ",".join(dict.fromkeys(l.lower() for l in labels)) if labels else ""
+        if label:
+            for node in expand_nodelist(node_str.strip()):
+                mapping[node] = label
+    return mapping
+
+
+def _parse_gres_count(gres_str: str) -> int:
+    """Extract total GPU count from a gres string like ``gpu:h100:8(S:0-1)``."""
+    total = 0
+    for part in gres_str.split(","):
+        stripped = re.sub(r"\(.*?\)", "", part.strip())  # drop socket/IDX info
+        if stripped.startswith("gpu"):
+            segs = stripped.split(":")
+            total += int(segs[-1]) if segs[-1].isdigit() else 0
+    return total
+
+
+def _available_capacity(
+    partition: str,
+    *,
+    gres: Optional[str] = None,
+    nodelist: Optional[str] = None,
+    gpu_names: Optional[Iterable[str]] = None,
+) -> Optional[int]:
+    """Return the max number of jobs the partition can currently satisfy, or *None* if unknown.
+
+    For GPU partitions this queries both total and *used* GRES per node so that
+    only actually free GPUs are counted (not just idle/mixed state).
+    """
+    wants_gpu = gres and "gpu" in gres.lower()
+    if wants_gpu:
+        cmd = ["sinfo", "-h", "-p", partition, "-N",
+               "-O", "NodeList:|,Gres:|,GresUsed:|,StateLong:|"]
+    else:
+        cmd = ["sinfo", "-h", "-p", partition, "-o", "%N|%t"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        if result.returncode != 0:
+            return None
+    except Exception:
+        return None
+
+    idle_nodes: set[str] = set()
+
+    if wants_gpu:
+        from slurmcli.slurm_parser import extract_gpu_labels
+        gpu_filter = [g.strip().lower() for g in gpu_names] if gpu_names else None
+        free_gpus = 0
+        for line in result.stdout.strip().splitlines():
+            fields = [f.strip() for f in line.split("|")]
+            if len(fields) < 4:
+                continue
+            node, gres_total, gres_used, state = fields[0], fields[1], fields[2], fields[3]
+            if "idle" not in state.lower() and "mix" not in state.lower():
+                continue
+            if gpu_filter:
+                labels = [l.lower() for l in extract_gpu_labels(gres_total)]
+                if not any(g in labels for g in gpu_filter):
+                    continue
+            free_gpus += _parse_gres_count(gres_total) - _parse_gres_count(gres_used)
+            idle_nodes.add(node)
+        try:
+            gpus_per_job = int(gres.split(":")[-1])
+        except (ValueError, IndexError):
+            gpus_per_job = 1
+        return free_gpus // gpus_per_job if gpus_per_job > 0 else len(idle_nodes)
+    else:
+        from slurmcli.cluster_status import expand_nodelist
+        for line in result.stdout.strip().splitlines():
+            parts = line.split("|")
+            if len(parts) < 2:
+                continue
+            node_str, state = parts[0], parts[1]
+            if "idle" not in state.strip().lower() and "mix" not in state.strip().lower():
+                continue
+            idle_nodes.update(expand_nodelist(node_str.strip()))
+        return len(idle_nodes)
 
 
 def _normalize_slurm_memory(memory: str) -> str:
@@ -1035,7 +1148,8 @@ def get_cluster(
     scheduler_port_configured = PORT_SLURM_SCHEDULER
     scheduler_port = scheduler_port_configured
     if scheduler_port and scheduler_port > 0 and not is_port_available(scheduler_port):
-        print(f"⚠️ Dask scheduler port {scheduler_port} already in use; requesting an ephemeral port instead.")
+        if verbose >= 2:
+            print(f"⚠️ Dask scheduler port {scheduler_port} already in use; requesting an ephemeral port instead.")
         scheduler_port = 0
 
     scheduler_options: Dict[str, Any] = {"port": scheduler_port if scheduler_port is not None else 0}
@@ -1045,7 +1159,8 @@ def get_cluster(
     if local:
         if cluster_id is None:
             cluster_id = _generate_cluster_id()
-        print("🚀 Starting a local Dask cluster…")
+        if verbose >= 1:
+            print("🚀 Starting a local Dask cluster…")
         if n_workers is not None:
             n_workers_local = int(max(1, n_workers))
         else:
@@ -1067,7 +1182,6 @@ def get_cluster(
         if cluster_id is None:
             cluster_id = _generate_cluster_id()
         queue_label = f"the '{queue}' SLURM partition" if queue else "the default SLURM partition"
-        print(f"🚀 Submitting {num_jobs} jobs to {queue_label}…")
         memory = _normalize_slurm_memory(memory)
         os.makedirs(log_dir, exist_ok=True)
         prologue, venv_python = _build_venv_prologue(
@@ -1091,9 +1205,11 @@ def get_cluster(
                         job_extra_directives.append(f"--nodelist={nodelist},{gpu_nodelist}")
                     else:
                         job_extra_directives.append(f"--nodelist={gpu_nodelist}")
-                    print(f"✅ GPU filter {gpu_list} → {len(matching_nodes)} node(s): {gpu_nodelist}")
+                    if verbose >= 2:
+                        print(f"✅ GPU filter {gpu_list} → {len(matching_nodes)} node(s): {gpu_nodelist}")
                 else:
-                    print(f"⚠️ No nodes found with GPU type(s) {gpu_list} in partition '{queue}'; submitting without node filter.")
+                    if verbose >= 2:
+                        print(f"⚠️ No nodes found with GPU type(s) {gpu_list} in partition '{queue}'; submitting without node filter.")
         if gres and 'gpu' in (gres or ""):
             try:
                 num_gpus = int(gres.split(':')[-1])
@@ -1101,7 +1217,8 @@ def get_cluster(
                     job_extra_directives.append(f"--gpus-per-task={num_gpus}")
                     job_extra_directives.append(f"--gpu-bind=single:{num_gpus}")
                     worker_extra_args.extend(["--resources", f"GPU={num_gpus}"])
-                    print(f"✅ Configuring workers with --gpus-per-task={num_gpus}")
+                    if verbose >= 2:
+                        print(f"✅ Configuring workers with --gpus-per-task={num_gpus}")
             except Exception:
                 if gres:
                     job_extra_directives.append(f"--gres={gres}")
@@ -1113,6 +1230,7 @@ def get_cluster(
             cores=cores_for_job,
             memory=memory,
             walltime=walltime,
+            death_timeout="15",
             job_name=job_name,
             log_directory=log_dir,
             job_script_prologue=prologue,
@@ -1132,23 +1250,35 @@ def get_cluster(
                 print("--- End SLURM job script ---\n")
         except Exception as exc:
             logger.debug("Unable to render SLURM job script: %s", exc, exc_info=False)
+        # Pre-flight: warn if requesting more jobs than available capacity (but don't clip — let SLURM queue)
+        if queue:
+            capacity = _available_capacity(queue, gres=gres, nodelist=nodelist, gpu_names=gpu_names)
+            if capacity is not None and capacity < num_jobs:
+                logger.info(
+                    "Partition '%s' has ~%d free slot(s) for %d requested jobs — SLURM will queue the rest.",
+                    queue, capacity, num_jobs,
+                )
+
+        if verbose >= 1:
+            print(f"🚀 Submitting {num_jobs} jobs to {queue_label}…")
         cluster.scale(n=num_jobs)
         client = Client(cluster)
 
     cluster_type = "local" if local else ("gpu" if ("gpu" in (queue or "").lower() or "gpu" in (gres or "").lower()) else "cpu")
     _record_scheduler_address(client.scheduler.address, cluster_type, cluster_id)
-    print(f"🪪 Cluster id: {cluster_id}")
 
     if n_workers is not None:
         total_workers_expected = int(max(1, n_workers))
     else:
         total_workers_expected = num_jobs * processes
-    print("Cluster dashboard:", getattr(cluster, "dashboard_link", "n/a"))
-    print("Scheduler address:", client.scheduler.address)
-    print(f"\n⏳ Waiting for {total_workers_expected} workers to connect…")
-    print(f"\n⏳ Waiting for {total_workers_expected} workers to connect…")
+    if verbose >= 2:
+        print(f"🪪 Cluster id: {cluster_id}")
+        print("Cluster dashboard:", getattr(cluster, "dashboard_link", "n/a"))
+    if verbose >= 1:
+        print("Scheduler address:", client.scheduler.address)
+        print(f"⏳ Waiting for {total_workers_expected} workers to connect…")
     try:
-        if local:
+        if local or verbose < 2:
             client.wait_for_workers(n_workers=total_workers_expected, timeout=300)
         else:
             _wait_for_workers_with_queue(
@@ -1196,12 +1326,30 @@ def get_cluster(
     total_cores = sum(w.get("nthreads", 0) for w in workers.values())
     total_mem_bytes = sum(w.get("memory_limit", 0) for w in workers.values())
     total_mem_gb = total_mem_bytes / (1024 ** 3) if total_mem_bytes else 0.0
-    print(f"\n✅ Workers connected: {n_workers}")
-    if n_workers < total_workers_expected:
-        print(f"⚠️ Requested {total_workers_expected} worker(s), but only {n_workers} connected.")
-    print(f"   Summary: {n_workers} worker(s) — total cores={total_cores}, total mem≈{total_mem_gb:.2f}GB\n")
+    if verbose >= 1:
+        import socket
+        from collections import Counter
+        def _resolve(ip):
+            try:
+                return socket.gethostbyaddr(ip)[0].split(".")[0]
+            except Exception:
+                return ip
+        node_counts = Counter(_resolve(addr.split("://")[-1].split(":")[0]) for addr in workers)
+        # Look up GPU types per node from sinfo
+        node_gpu = _get_node_gpu_labels()
+        parts = []
+        for node, count in sorted(node_counts.items()):
+            gpu_label = node_gpu.get(node, "")
+            tag = f"{count}x {node}" if count > 1 else node
+            if gpu_label:
+                tag += f" ({gpu_label})"
+            parts.append(tag)
+        print(f"✅ Workers connected: {n_workers} on {', '.join(parts)}")
+        if n_workers < total_workers_expected:
+            print(f"⚠️ Requested {total_workers_expected} worker(s), but only {n_workers} connected.")
+        print(f"   Summary: {n_workers} worker(s) — total cores={total_cores}, total mem≈{total_mem_gb:.2f}GB")
 
-    if verbose > 0:
+    if verbose >= 2:
         print_worker_details(workers, client)
 
     return cluster, client

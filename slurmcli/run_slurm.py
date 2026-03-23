@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, Union
 import signal
 
 from dask import delayed
-from dask.distributed import Client, progress
+from dask.distributed import Client, progress, WorkerPlugin
 from distributed.diagnostics.progressbar import ProgressBar
 from distributed.utils import LoopRunner
 import numpy as np
@@ -380,21 +380,36 @@ def _connect_to_scheduler(
     raise RuntimeError("Unable to connect to Dask scheduler") from last_error
 
 
-def _register_cluster_cleanup(client: Client, cluster: Any) -> None:
+def _scancel_cluster_jobs(cluster: Any) -> None:
+    """Directly scancel all SLURM jobs owned by this cluster. Works from signal
+    handlers because it only uses subprocess (no async/event-loop needed)."""
+    import subprocess
+    workers = getattr(cluster, "workers", {}) or {}
+    job_ids = {str(getattr(w, "job_id", "")) for w in workers.values()} - {""}
+    if not job_ids:
+        return
+    try:
+        subprocess.run(["scancel"] + sorted(job_ids), timeout=5)
+    except Exception:
+        pass
+
+
+def _register_cluster_cleanup(client: Client, cluster: Any, cluster_id: str = "unknown") -> None:
     global _ACTIVE_CLIENT, _ACTIVE_CLUSTER, _SIGNALS_INSTALLED
     _ACTIVE_CLIENT = client
     _ACTIVE_CLUSTER = cluster
 
     def _cleanup():
         stop_log_tailing()
+        # Synchronous scancel first — works even if event loop is blocked
+        if cluster is not None:
+            _scancel_cluster_jobs(cluster)
         try:
-            logger.info("Closing Dask client (cluster_id=%s).", cluster_id or "unknown")
             client.close()
         except Exception:
             pass
         try:
             if cluster is not None:
-                logger.info("Closing Dask cluster (cluster_id=%s).", cluster_id or "unknown")
                 cluster.close()
         except Exception:
             pass
@@ -500,7 +515,7 @@ class _TqdmProgressBar(ProgressBar):
         interval="100ms",
         complete=True,
         loop=None,
-        desc: str = "slurmcli.vmap",
+        desc: str = "slurmcli.smap",
         start: bool = True,
         mode: str = "auto",
     ):
@@ -509,7 +524,7 @@ class _TqdmProgressBar(ProgressBar):
         try:
             tqdm = _resolve_tqdm(mode)
         except Exception as exc:
-            raise RuntimeError("tqdm is required for slurmcli.vmap progress output") from exc
+            raise RuntimeError("tqdm is required for slurmcli.smap progress output") from exc
         self._tqdm = tqdm(
             total=0,
             desc=desc,
@@ -542,6 +557,134 @@ class _TqdmProgressBar(ProgressBar):
             self._tqdm.set_postfix_str("error", refresh=False)
         self._tqdm.close()
 
+
+class _TqdmForwardPlugin(WorkerPlugin):
+    """Dask WorkerPlugin that monkey-patches tqdm on each worker to forward
+    progress events back to the client via ``worker.log_event``."""
+
+    name = "slurmcli-tqdm-forward"
+
+    def setup(self, worker):
+        import tqdm.std as _tqdm_mod
+
+        orig_init = _tqdm_mod.tqdm.__init__
+        orig_update = _tqdm_mod.tqdm.update
+        orig_close = _tqdm_mod.tqdm.close
+
+        worker._slurmcli_tqdm_originals = (orig_init, orig_update, orig_close)
+        worker._slurmcli_tqdm_counter = 0
+        worker._slurmcli_tqdm_depth = 0  # only forward outermost bar
+        worker._slurmcli_tqdm_throttle = {}  # bar_id -> last_event_time
+
+        def _patched_init(bar_self, *a, **kw):
+            orig_init(bar_self, *a, **kw)
+            bar_self._slurmcli_id = None
+            if worker._slurmcli_tqdm_depth == 0:
+                worker._slurmcli_tqdm_counter += 1
+                bar_self._slurmcli_id = f"{worker.address}:{worker._slurmcli_tqdm_counter}"
+                worker.log_event("slurmcli_tqdm", {
+                    "t": "init", "id": bar_self._slurmcli_id,
+                    "total": bar_self.total, "desc": bar_self.desc,
+                })
+            worker._slurmcli_tqdm_depth += 1
+
+        def _patched_update(bar_self, n=1):
+            orig_update(bar_self, n)
+            bar_id = getattr(bar_self, "_slurmcli_id", None)
+            if bar_id is None:
+                return
+            now = time.time()
+            last = worker._slurmcli_tqdm_throttle.get(bar_id, 0.0)
+            if now - last < 0.5:
+                return
+            worker._slurmcli_tqdm_throttle[bar_id] = now
+            worker.log_event("slurmcli_tqdm", {
+                "t": "update", "id": bar_id,
+                "n": bar_self.n, "total": bar_self.total,
+                "postfix": bar_self.postfix or "",
+            })
+
+        def _patched_close(bar_self):
+            worker._slurmcli_tqdm_depth = max(0, worker._slurmcli_tqdm_depth - 1)
+            bar_id = getattr(bar_self, "_slurmcli_id", None)
+            if bar_id is not None:
+                worker.log_event("slurmcli_tqdm", {
+                    "t": "update", "id": bar_id,
+                    "n": bar_self.n, "total": bar_self.total,
+                    "postfix": bar_self.postfix or "",
+                })
+                worker.log_event("slurmcli_tqdm", {"t": "close", "id": bar_id})
+                worker._slurmcli_tqdm_throttle.pop(bar_id, None)
+            orig_close(bar_self)
+
+        _tqdm_mod.tqdm.__init__ = _patched_init
+        _tqdm_mod.tqdm.update = _patched_update
+        _tqdm_mod.tqdm.close = _patched_close
+
+    def teardown(self, worker):
+        import tqdm.std as _tqdm_mod
+
+        originals = getattr(worker, "_slurmcli_tqdm_originals", None)
+        if originals is not None:
+            _tqdm_mod.tqdm.__init__, _tqdm_mod.tqdm.update, _tqdm_mod.tqdm.close = originals
+            del worker._slurmcli_tqdm_originals
+            del worker._slurmcli_tqdm_counter
+            del worker._slurmcli_tqdm_depth
+            del worker._slurmcli_tqdm_throttle
+
+
+class _TqdmForwarder:
+    """Client-side subscriber that renders local tqdm bars from worker events."""
+
+    def __init__(self, client, mode="auto"):
+        self._client = client
+        self._bars = {}  # bar_id -> tqdm bar
+        self._lock = threading.Lock()
+        self._tqdm_cls = _resolve_tqdm(mode)
+        self._topic = "slurmcli_tqdm"
+        client.subscribe_topic(self._topic, self._on_event)
+
+    def _on_event(self, event):
+        # event is (timestamp, msg_dict)
+        _, msg = event
+        bar_id = msg["id"]
+        t = msg["t"]
+        with self._lock:
+            if t == "init":
+                # extract short worker name from bar_id like "tcp://host:port:N"
+                worker_part = bar_id.rsplit(":", 1)[0]
+                worker_short = worker_part.split("://")[-1]
+                desc = msg.get("desc") or ""
+                label = f"[{worker_short}] {desc}" if desc else f"[{worker_short}]"
+                self._bars[bar_id] = self._tqdm_cls(
+                    total=msg.get("total"), desc=label, leave=False, dynamic_ncols=True, file=sys.stderr,
+                )
+            elif t == "update":
+                bar = self._bars.get(bar_id)
+                if bar is not None:
+                    new_n = msg.get("n", 0)
+                    new_total = msg.get("total")
+                    if new_total is not None and bar.total != new_total:
+                        bar.total = new_total
+                    postfix = msg.get("postfix", "")
+                    if postfix and postfix != bar.postfix:
+                        bar.set_postfix_str(postfix, refresh=False)
+                    delta = new_n - bar.n
+                    if delta > 0:
+                        bar.update(delta)
+            elif t == "close":
+                bar = self._bars.pop(bar_id, None)
+                if bar is not None:
+                    if bar.total is not None and bar.n < bar.total:
+                        bar.update(bar.total - bar.n)
+                    bar.close()
+
+    def close(self):
+        self._client.unsubscribe_topic(self._topic)
+        with self._lock:
+            for bar in self._bars.values():
+                bar.close()
+            self._bars.clear()
 
 
 def _wait_for_workers(client: Client, attempts: int, delay: float) -> bool:
@@ -765,7 +908,7 @@ def get_client(
         )
         logger.info("Scheduler address saved to %s", SCHEDULER_ADDRESS_FILE)
         if shutdown_on_exit:
-            _register_cluster_cleanup(client, cluster)
+            _register_cluster_cleanup(client, cluster, cluster_id=cluster_id or "unknown")
         elif ensure_gc_cleanup:
             weakref.finalize(client, client.close)
             if cluster is not None:
@@ -815,7 +958,7 @@ def _normalize_in_axes(in_axes: Any, nargs: int) -> list[Optional[int]]:
 
 def _axis_size(arg: Any, axis: int) -> int:
     if axis != 0:
-        raise NotImplementedError("Only axis=0 is supported by slurmcli.vmap")
+        raise NotImplementedError("Only axis=0 is supported by slurmcli.smap")
     if hasattr(arg, "shape") and arg.shape is not None:
         return int(arg.shape[axis])
     return len(arg)
@@ -825,7 +968,7 @@ def _slice_arg(arg: Any, axis: Optional[int], index: int) -> Any:
     if axis is None:
         return arg
     if axis != 0:
-        raise NotImplementedError("Only axis=0 is supported by slurmcli.vmap")
+        raise NotImplementedError("Only axis=0 is supported by slurmcli.smap")
     return arg[index]
 
 
@@ -833,7 +976,7 @@ def _stack_results(results: Sequence[Any], out_axes: Optional[int]) -> Any:
     if out_axes is None:
         return list(results)
     if out_axes != 0:
-        raise NotImplementedError("Only out_axes=0 is supported by slurmcli.vmap")
+        raise NotImplementedError("Only out_axes=0 is supported by slurmcli.smap")
     if not results:
         return np.asarray([])
     first = results[0]
@@ -845,7 +988,7 @@ def _stack_results(results: Sequence[Any], out_axes: Optional[int]) -> Any:
     return np.stack(results, axis=0)
 
 
-def vmap(
+def smap(
     fun,
     in_axes: Any = 0,
     out_axes: Any = 0,
@@ -853,6 +996,7 @@ def vmap(
     axis_name: Optional[str] = None,
     axis_size: Optional[int] = None,
     sequential: bool = False,
+    verbose: int = 1,
     cluster_id: Optional[str] = None,
     client: Optional[Client] = None,
     show_progress: bool = True,
@@ -860,39 +1004,40 @@ def vmap(
     cache_check: Any = "auto",
     return_info: bool = False,
     disconnect: bool = True,
+    gpu_names: Optional[Iterable[str]] = None,
     **client_kwargs,
 ):
-    """Distributed vmap similar to jax.vmap, executing slices via Dask.
+    """Distributed smap (SLURM map), executing slices via Dask.
 
     Accepts all get_client kwargs via **client_kwargs (e.g. local, num_jobs).
     Only axis=0 is supported for now. Returns the gathered results (stacked).
-    If cache_check="auto" (default), vmap uses joblib-style cache checks when
-    the function exposes check_call_in_cache; when all calls return True, vmap
+    If cache_check="auto" (default), smap uses joblib-style cache checks when
+    the function exposes check_call_in_cache; when all calls return True, smap
     runs locally instead of launching Dask jobs. Use sequential=True to force
     a local for-loop (requires local=True).
     """
     if axis_name is not None:
-        raise NotImplementedError("axis_name is not supported by slurmcli.vmap")
+        raise NotImplementedError("axis_name is not supported by slurmcli.smap")
     if axis_size is not None:
-        raise NotImplementedError("axis_size is not supported by slurmcli.vmap")
+        raise NotImplementedError("axis_size is not supported by slurmcli.smap")
     if sequential:
         if client is not None:
-            raise ValueError("slurmcli.vmap(sequential=True) requires local=True and no active client.")
+            raise ValueError("slurmcli.smap(sequential=True) requires local=True and no active client.")
         if not client_kwargs.get("local", False):
-            raise ValueError("slurmcli.vmap(sequential=True) requires local=True.")
+            raise ValueError("slurmcli.smap(sequential=True) requires local=True.")
 
     def _mapped(*args: Any):
         if not args:
-            raise ValueError("vmap-mapped function requires at least one argument")
+            raise ValueError("smap-mapped function requires at least one argument")
         axes = _normalize_in_axes(in_axes, len(args))
         mapped_sizes = [(_axis_size(arg, ax) if ax is not None else None) for arg, ax in zip(args, axes)]
         inferred = [size for size in mapped_sizes if size is not None]
         if not inferred:
-            raise ValueError("vmap requires at least one argument with in_axes != None")
+            raise ValueError("smap requires at least one argument with in_axes != None")
         size = inferred[0]
         for other in inferred[1:]:
             if other != size:
-                raise ValueError(f"vmap arguments have mismatched axis sizes: {inferred}")
+                raise ValueError(f"smap arguments have mismatched axis sizes: {inferred}")
 
         use_local = sequential
         cache_probe = None
@@ -922,10 +1067,10 @@ def vmap(
             try:
                 tqdm = _resolve_tqdm(mode)
             except Exception as exc:
-                raise RuntimeError("tqdm is required for slurmcli.vmap progress output") from exc
-            iterator = tqdm(range(size), total=size, desc="slurmcli.vmap")
+                raise RuntimeError("tqdm is required for slurmcli.smap progress output") from exc
+            iterator = tqdm(range(size), total=size, desc="slurmcli.smap")
             if _DEBUG_ENABLED:
-                logger.info("vmap: running locally for %d task(s)", size)
+                logger.info("smap: running locally for %d task(s)", size)
             results = [
                 fun(*[_slice_arg(arg, ax, i) for arg, ax in zip(args, axes)])
                 for i in iterator
@@ -946,13 +1091,24 @@ def vmap(
         if active_client is None:
             kwargs = dict(client_kwargs)
             kwargs.pop("return_cluster", None)
-            if "tail_logs" not in kwargs:
+            kwargs["verbose"] = verbose
+            if verbose >= 2:
+                kwargs["tail_logs"] = True
+            elif "tail_logs" not in kwargs:
                 kwargs["tail_logs"] = False
             if cluster_id is not None:
                 kwargs["cluster_id"] = cluster_id
+            if gpu_names is not None:
+                kwargs["gpu_names"] = gpu_names
             if _DEBUG_ENABLED:
-                logger.info("vmap: acquiring client with %s", kwargs)
+                logger.info("smap: acquiring client with %s", kwargs)
             active_client, cluster = get_client(return_cluster=True, **kwargs)
+
+        forwarder = None
+        if verbose >= 1:
+            plugin = _TqdmForwardPlugin()
+            active_client.register_plugin(plugin)
+            forwarder = _TqdmForwarder(active_client, mode=progress_mode)
 
         t0 = time.time()
         tasks = [
@@ -960,7 +1116,7 @@ def vmap(
             for i in range(size)
         ]
         if _DEBUG_ENABLED:
-            logger.info("vmap: submitting %d task(s) to Dask", len(tasks))
+            logger.info("smap: submitting %d task(s) to Dask", len(tasks))
         futures = active_client.compute(tasks)
         mode = (progress_mode or "auto").lower()
         if mode not in ("tqdm", "notebook", "auto"):
@@ -972,9 +1128,29 @@ def vmap(
             complete=True,
             mode=mode,
         )
-        results = active_client.gather(futures)
+        try:
+            results = active_client.gather(futures)
+        except Exception as exc:
+            if forwarder is not None:
+                forwarder.close()
+                active_client.unregister_worker_plugin("slurmcli-tqdm-forward")
+            # Surface worker stderr so deserialization / import errors aren't silent
+            if cluster is not None:
+                log_directory = getattr(cluster, "_job_kwargs", {}).get("log_directory")
+                if log_directory:
+                    log_path = Path(log_directory)
+                    err_files = sorted(log_path.glob("*.err"), key=os.path.getmtime, reverse=True)
+                    for ef in err_files[:4]:
+                        if time.time() - os.path.getmtime(ef) < 120:
+                            lines = ef.read_text().splitlines()
+                            print(f"\n--- {ef.name} (last 20 lines) ---")
+                            print("\n".join(lines[-20:]))
+            raise
+        if forwarder is not None:
+            forwarder.close()
+            active_client.unregister_worker_plugin("slurmcli-tqdm-forward")
         if _DEBUG_ENABLED:
-            logger.info("vmap: gathered %d result(s)", len(results))
+            logger.info("smap: gathered %d result(s)", len(results))
         elapsed = time.time() - t0
 
         scheduler = getattr(active_client, "scheduler", None) if active_client else None
@@ -988,13 +1164,13 @@ def vmap(
 
         if owns_client and disconnect:
             try:
-                logger.info("Closing Dask client after vmap (cluster_id=%s).", cluster_id or "unknown")
+                logger.info("Closing Dask client after smap (cluster_id=%s).", cluster_id or "unknown")
                 active_client.close()
             except Exception:
                 pass
             try:
                 if cluster is not None:
-                    logger.info("Closing Dask cluster after vmap (cluster_id=%s).", cluster_id or "unknown")
+                    logger.info("Closing Dask cluster after smap (cluster_id=%s).", cluster_id or "unknown")
                     cluster.close()
             except Exception:
                 pass

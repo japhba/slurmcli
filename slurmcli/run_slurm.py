@@ -988,6 +988,16 @@ def _stack_results(results: Sequence[Any], out_axes: Optional[int]) -> Any:
     return np.stack(results, axis=0)
 
 
+def _is_jupyter() -> bool:
+    """Detect if we're running inside a Jupyter/IPython kernel."""
+    try:
+        from IPython import get_ipython
+        ip = get_ipython()
+        return ip is not None and ip.__class__.__name__ == "ZMQInteractiveShell"
+    except ImportError:
+        return False
+
+
 def smap(
     fun,
     in_axes: Any = 0,
@@ -1105,14 +1115,32 @@ def smap(
             active_client, cluster = get_client(return_cluster=True, **kwargs)
 
         forwarder = None
+        _tqdm_fun = fun
         if verbose >= 1:
-            plugin = _TqdmForwardPlugin()
-            active_client.register_plugin(plugin)
+            if not _is_jupyter():
+                # Outside Jupyter: use register_plugin (fast, reliable)
+                plugin = _TqdmForwardPlugin()
+                active_client.register_plugin(plugin)
+            else:
+                # Inside Jupyter: register_plugin causes worker disconnection.
+                # Wrap the function to set up tqdm forwarding lazily on the worker.
+                _tqdm_plugin = _TqdmForwardPlugin()
+                def _wrap_with_tqdm(fn, plugin):
+                    from functools import wraps
+                    @wraps(fn)
+                    def wrapper(*a, **kw):
+                        from distributed import get_worker
+                        worker = get_worker()
+                        if not hasattr(worker, '_slurmcli_tqdm_originals'):
+                            plugin.setup(worker)
+                        return fn(*a, **kw)
+                    return wrapper
+                _tqdm_fun = _wrap_with_tqdm(fun, _tqdm_plugin)
             forwarder = _TqdmForwarder(active_client, mode=progress_mode)
 
         t0 = time.time()
         tasks = [
-            delayed(fun)(*[_slice_arg(arg, ax, i) for arg, ax in zip(args, axes)])
+            delayed(_tqdm_fun)(*[_slice_arg(arg, ax, i) for arg, ax in zip(args, axes)])
             for i in range(size)
         ]
         if _DEBUG_ENABLED:
@@ -1133,7 +1161,8 @@ def smap(
         except Exception as exc:
             if forwarder is not None:
                 forwarder.close()
-                active_client.unregister_worker_plugin("slurmcli-tqdm-forward")
+                if not _is_jupyter():
+                    active_client.unregister_worker_plugin("slurmcli-tqdm-forward")
             # Surface worker stderr so deserialization / import errors aren't silent
             if cluster is not None:
                 log_directory = getattr(cluster, "_job_kwargs", {}).get("log_directory")
@@ -1148,7 +1177,8 @@ def smap(
             raise
         if forwarder is not None:
             forwarder.close()
-            active_client.unregister_worker_plugin("slurmcli-tqdm-forward")
+            if not _is_jupyter():
+                active_client.unregister_worker_plugin("slurmcli-tqdm-forward")
         if _DEBUG_ENABLED:
             logger.info("smap: gathered %d result(s)", len(results))
         elapsed = time.time() - t0

@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from collections import defaultdict
 from functools import partial
 from pathlib import Path
@@ -998,6 +999,9 @@ def _is_jupyter() -> bool:
         return False
 
 
+SMAP_BATCH_ID_KEY = "_smap_batch_id"
+
+
 def smap(
     fun,
     in_axes: Any = 0,
@@ -1015,6 +1019,7 @@ def smap(
     return_info: bool = False,
     disconnect: bool = True,
     gpu_names: Optional[Iterable[str]] = None,
+    batch_id: Union[str, bool] = True,
     **client_kwargs,
 ):
     """Distributed smap (SLURM map), executing slices via Dask.
@@ -1025,7 +1030,16 @@ def smap(
     the function exposes check_call_in_cache; when all calls return True, smap
     runs locally instead of launching Dask jobs. Use sequential=True to force
     a local for-loop (requires local=True).
+
+    If batch_id is True (default), a short UUID is auto-generated and injected
+    as ``_smap_batch_id`` into every dict argument before dispatch. Pass a
+    string to use a custom batch_id, or False to disable injection.
+    The batch_id is also available as ``_mapped.batch_id`` on the returned callable.
     """
+    if batch_id is True:
+        batch_id = str(uuid.uuid4())[:8]
+    elif batch_id is False:
+        batch_id = None
     if axis_name is not None:
         raise NotImplementedError("axis_name is not supported by slurmcli.smap")
     if axis_size is not None:
@@ -1049,6 +1063,15 @@ def smap(
             if other != size:
                 raise ValueError(f"smap arguments have mismatched axis sizes: {inferred}")
 
+        def _slice_args_for(i):
+            sliced = [_slice_arg(arg, ax, i) for arg, ax in zip(args, axes)]
+            if batch_id is not None:
+                sliced = [({**a, SMAP_BATCH_ID_KEY: batch_id} if isinstance(a, dict) else a) for a in sliced]
+            return sliced
+
+        if batch_id is not None and verbose >= 1:
+            print(f"smap batch_id: {batch_id}")
+
         use_local = sequential
         cache_probe = None
         if cache_check in ("auto", True):
@@ -1061,8 +1084,7 @@ def smap(
             try:
                 all_cached = True
                 for i in range(size):
-                    slice_args = [_slice_arg(arg, ax, i) for arg, ax in zip(args, axes)]
-                    if not cache_probe(*slice_args):
+                    if not cache_probe(*_slice_args_for(i)):
                         all_cached = False
                         break
                 use_local = all_cached
@@ -1082,7 +1104,7 @@ def smap(
             if _DEBUG_ENABLED:
                 logger.info("smap: running locally for %d task(s)", size)
             results = [
-                fun(*[_slice_arg(arg, ax, i) for arg, ax in zip(args, axes)])
+                fun(*_slice_args_for(i))
                 for i in iterator
             ]
             elapsed = time.time() - t0
@@ -1091,6 +1113,7 @@ def smap(
                 "elapsed": elapsed,
                 "scheduler_address": None,
                 "cache_only": True,
+                "batch_id": batch_id,
             }
             output = _stack_results(results, out_axes)
             return (output, info) if return_info else output
@@ -1106,8 +1129,7 @@ def smap(
                 kwargs["tail_logs"] = True
             elif "tail_logs" not in kwargs:
                 kwargs["tail_logs"] = False
-            if cluster_id is not None:
-                kwargs["cluster_id"] = cluster_id
+            kwargs["cluster_id"] = cluster_id or batch_id
             if gpu_names is not None:
                 kwargs["gpu_names"] = gpu_names
             if _DEBUG_ENABLED:
@@ -1140,7 +1162,7 @@ def smap(
 
         t0 = time.time()
         tasks = [
-            delayed(_tqdm_fun)(*[_slice_arg(arg, ax, i) for arg, ax in zip(args, axes)])
+            delayed(_tqdm_fun)(*_slice_args_for(i))
             for i in range(size)
         ]
         if _DEBUG_ENABLED:
@@ -1187,6 +1209,7 @@ def smap(
         info = {
             "n_tasks": size,
             "elapsed": elapsed,
+            "batch_id": batch_id,
             "scheduler_address": scheduler.address if scheduler else None,
         }
 
@@ -1212,6 +1235,7 @@ def smap(
             return output, info
         return output
 
+    _mapped.batch_id = batch_id
     return _mapped
 
 

@@ -8,13 +8,26 @@ targets:
     platform: macOS
     sources:
       - Sources/SlurmHUDApp
-      - Sources/Shared
+      - path: Sources/Shared
+        includes:
+          - Config.swift
+          - Helpers.swift
+          - MockClusterData.swift
+          - Models.swift
+          - NotificationManager.swift
+          - SSHRunner.swift
+          - StatusFetcher.swift
+          - WatchStore.swift
     info:
       path: Sources/SlurmHUDApp/Info.plist
+      properties:
+        SlurmHUDAppGroupIdentifier: $(SLURMHUD_APP_GROUP_IDENTIFIER)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jbauer.SlurmHUD
         CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Sources/SlurmHUDApp/SlurmHUD.entitlements
+        SLURMHUD_APP_GROUP_IDENTIFIER: $(TeamIdentifierPrefix)com.jbauer.slurmhud.shared
     postBuildScripts:
       - script: |
           cp "${SRCROOT}/Sources/SlurmHUDApp/AppIcon.icns" "${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources/AppIcon.icns"
@@ -26,13 +39,20 @@ targets:
     platform: macOS
     sources:
       - Sources/SlurmHUDWidget
-      - Sources/Shared
+      - path: Sources/Shared
+        includes:
+          - Config.swift
+          - MockClusterData.swift
+          - Models.swift
     info:
       path: Sources/SlurmHUDWidget/Info.plist
       properties:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        SlurmHUDAppGroupIdentifier: $(SLURMHUD_APP_GROUP_IDENTIFIER)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jbauer.SlurmHUD.SlurmHUDWidget
         CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Sources/SlurmHUDWidget/SlurmHUDWidget.entitlements
+        SLURMHUD_APP_GROUP_IDENTIFIER: $(TeamIdentifierPrefix)com.jbauer.slurmhud.shared

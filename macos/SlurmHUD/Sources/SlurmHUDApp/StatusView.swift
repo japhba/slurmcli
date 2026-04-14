@@ -27,6 +27,7 @@ struct StatusView: View {
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .disabled(fetcher.isFetching)
             }
             ToolbarItem(placement: .automatic) {
                 Button {
@@ -43,6 +44,9 @@ struct StatusView: View {
         }
         .onAppear {
             fetcher.fetch(config: configStore.config, completion: nil)
+            scheduleRefresh()
+        }
+        .onReceive(configStore.$config) { _ in
             scheduleRefresh()
         }
         .onDisappear {
@@ -75,8 +79,8 @@ struct StatusView: View {
             }
             .navigationTitle("Partitions")
         } else if let error = fetcher.lastError {
-            Text("Error: \(error)")
-                .foregroundColor(.red)
+            Text(isWaitingMessage(error) ? error : "Error: \(error)")
+                .foregroundColor(isWaitingMessage(error) ? .secondary : .red)
                 .padding()
         } else {
             Text("Waiting for data...")
@@ -94,13 +98,26 @@ struct StatusView: View {
                let partition = snapshot.partitions.first(where: { $0.id == partID }) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
+                        if fetcher.isFetching {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Refreshing cluster data…")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
                         if let timestamp = snapshot.generated_at {
-                            Text("Updated: \(timestamp)")
+                            Text("Updated: \(Self.formatTimestamp(timestamp))")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                         if let nodes = partition.node_details, !nodes.isEmpty {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 10)], spacing: 10) {
+                            LazyVGrid(
+                                columns: [GridItem(.adaptive(minimum: 240), spacing: 10, alignment: .top)],
+                                alignment: .leading,
+                                spacing: 10
+                            ) {
                                 ForEach(nodes) { node in
                                     NodeCellView(node: node)
                                 }
@@ -169,6 +186,30 @@ struct StatusView: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
+    // MARK: - Formatting
+
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let displayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .medium
+        return f
+    }()
+
+    private static func formatTimestamp(_ raw: String) -> String {
+        guard let date = isoFormatter.date(from: raw) else { return raw }
+        let local = displayFormatter.string(from: date)
+        let ago = RelativeDateTimeFormatter()
+        ago.unitsStyle = .abbreviated
+        let relative = ago.localizedString(for: date, relativeTo: Date())
+        return "\(local) (\(relative))"
+    }
+
     // MARK: - Timer
 
     private func scheduleRefresh() {
@@ -178,10 +219,20 @@ struct StatusView: View {
             fetcher.fetch(config: configStore.config, completion: nil)
         }
     }
+
+    private func isWaitingMessage(_ message: String) -> Bool {
+        message.localizedCaseInsensitiveContains("next scheduled refresh")
+    }
 }
 
 struct NodeCellView: View {
     let node: NodeDetail
+    @EnvironmentObject var watchStore: WatchStore
+
+    private var isWatched: Bool {
+        guard let name = node.node else { return false }
+        return watchStore.isWatched(name)
+    }
 
     private var stateColor: Color {
         let state = (node.state ?? "").lowercased()
@@ -207,7 +258,7 @@ struct NodeCellView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Header: node name + state
+            // Header: node name + watch + state
             HStack {
                 Text(node.node ?? "?")
                     .font(.system(.body, design: .monospaced))
@@ -215,6 +266,16 @@ struct NodeCellView: View {
                     .lineLimit(1)
                     .textSelection(.enabled)
                 Spacer()
+                Button {
+                    if let name = node.node {
+                        watchStore.toggle(name)
+                    }
+                } label: {
+                    Image(systemName: isWatched ? "bell.fill" : "bell")
+                        .foregroundColor(isWatched ? .yellow : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help(isWatched ? "Stop watching this node" : "Watch for job completions")
                 Text(node.state ?? "?")
                     .font(.caption2)
                     .padding(.horizontal, 5)
@@ -280,7 +341,7 @@ struct NodeCellView: View {
             }
         }
         .padding(10)
-        .frame(minWidth: 240)
+        .frame(minWidth: 240, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(stateColor)
         .overlay(
             RoundedRectangle(cornerRadius: 8)

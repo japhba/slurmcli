@@ -9,19 +9,21 @@
 /* Begin PBXBuildFile section */
 		2EA8A28A349743BDC03E26E6 /* SlurmHUDWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B296F1568362AFC5F0AA3774 /* SlurmHUDWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2EE917A1F2C4B3C78353EE8A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */; };
-		3165CE5950ADBA89F7AB0B8B /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */; };
 		6B7F3A62DFE7F31021D84A29 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8FFEB2916E988CF93EDD54A /* Models.swift */; };
-		7C1CCF0ADE3E6C6508B69558 /* StatusFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B9339635131CE857A3CCE3 /* StatusFetcher.swift */; };
 		883A211729CA689343B57F4A /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59A31133703E85DBB85CCEDA /* Config.swift */; };
 		91A3F94B6A0AE5A2897D64A1 /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59A31133703E85DBB85CCEDA /* Config.swift */; };
 		98D158557CBBB76E49FD043B /* StatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31A23D88138AD89C6871438B /* StatusView.swift */; };
-		AE65084B7C48B2122C423DA2 /* SSHRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D07E1604DCA874467F688E56 /* SSHRunner.swift */; };
+		B6826F3EBD4D710484B14A5C /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 261341808EC12D1FF6381325 /* NotificationManager.swift */; };
 		C3E4255E3C1BF472F7AB8F41 /* SlurmHUDWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37354B5FB24A7D5044F5572E /* SlurmHUDWidget.swift */; };
 		C57CA788F58DAD2576BFACFD /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8FFEB2916E988CF93EDD54A /* Models.swift */; };
 		C74207D654398066406BE42C /* SlurmHUDApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63B652A546791EB6847E6E0B /* SlurmHUDApp.swift */; };
 		CB40C3AD57A87C8C8EEAA4D0 /* StatusFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B9339635131CE857A3CCE3 /* StatusFetcher.swift */; };
+		D70808B39A59803D5C3407E7 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = B4127DE2A6B9FACD5D5ABDE9 /* AppIcon.icns */; };
+		D78B22801687491323263F42 /* MockClusterData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9028F490529615E92F73F354 /* MockClusterData.swift */; };
+		E1F1F841F2CFE9BA0EA16D45 /* MockClusterData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9028F490529615E92F73F354 /* MockClusterData.swift */; };
 		EDC6B4A2024D2133813213D6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DDF7244D503C8066EFE6400 /* SettingsView.swift */; };
 		F7FAE03A7624807AD4E2B0A0 /* SSHRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D07E1604DCA874467F688E56 /* SSHRunner.swift */; };
+		FE5FB2477677629BA82F18D2 /* WatchStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF8BBFBF7640F3B25A00EA1D /* WatchStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -49,6 +51,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		261341808EC12D1FF6381325 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
 		2DDF7244D503C8066EFE6400 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		31A23D88138AD89C6871438B /* StatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusView.swift; sourceTree = "<group>"; };
 		37354B5FB24A7D5044F5572E /* SlurmHUDWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlurmHUDWidget.swift; sourceTree = "<group>"; };
@@ -58,10 +61,13 @@
 		69392BD9DDEFBA1D61C87DA3 /* SlurmHUDWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SlurmHUDWidget.entitlements; sourceTree = "<group>"; };
 		758E8E2CDB2AFEDEA75A471D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
+		9028F490529615E92F73F354 /* MockClusterData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockClusterData.swift; sourceTree = "<group>"; };
 		B296F1568362AFC5F0AA3774 /* SlurmHUDWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SlurmHUDWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B4127DE2A6B9FACD5D5ABDE9 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
 		BDCA8DC2E9FE47CF46222EF4 /* SlurmHUD.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SlurmHUD.entitlements; sourceTree = "<group>"; };
 		CD85FFD788E21166230A1B3D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		D07E1604DCA874467F688E56 /* SSHRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHRunner.swift; sourceTree = "<group>"; };
+		DF8BBFBF7640F3B25A00EA1D /* WatchStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchStore.swift; sourceTree = "<group>"; };
 		ED81FBA12626A8A6145C6435 /* SlurmHUD.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SlurmHUD.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F8FFEB2916E988CF93EDD54A /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -72,9 +78,12 @@
 			children = (
 				59A31133703E85DBB85CCEDA /* Config.swift */,
 				7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */,
+				9028F490529615E92F73F354 /* MockClusterData.swift */,
 				F8FFEB2916E988CF93EDD54A /* Models.swift */,
+				261341808EC12D1FF6381325 /* NotificationManager.swift */,
 				D07E1604DCA874467F688E56 /* SSHRunner.swift */,
 				45B9339635131CE857A3CCE3 /* StatusFetcher.swift */,
+				DF8BBFBF7640F3B25A00EA1D /* WatchStore.swift */,
 			);
 			name = Shared;
 			path = Sources/Shared;
@@ -113,6 +122,7 @@
 		F59CF608AD3ACB9265CEEB1C /* SlurmHUDApp */ = {
 			isa = PBXGroup;
 			children = (
+				B4127DE2A6B9FACD5D5ABDE9 /* AppIcon.icns */,
 				CD85FFD788E21166230A1B3D /* Info.plist */,
 				2DDF7244D503C8066EFE6400 /* SettingsView.swift */,
 				BDCA8DC2E9FE47CF46222EF4 /* SlurmHUD.entitlements */,
@@ -131,7 +141,9 @@
 			buildConfigurationList = 072F2CA31530BA435E113A1A /* Build configuration list for PBXNativeTarget "SlurmHUD" */;
 			buildPhases = (
 				23E6DDF172901DC3E7FA2018 /* Sources */,
+				6C1FCEB84B6A8F01A8BBD80E /* Resources */,
 				FB66651C88247D1B2DB7BFDD /* Embed Foundation Extensions */,
+				61B0913B9CCD1E0074FAA95F /* Copy App Icon */,
 			);
 			buildRules = (
 			);
@@ -198,6 +210,38 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		6C1FCEB84B6A8F01A8BBD80E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D70808B39A59803D5C3407E7 /* AppIcon.icns in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		61B0913B9CCD1E0074FAA95F /* Copy App Icon */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Copy App Icon";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "cp \"${SRCROOT}/Sources/SlurmHUDApp/AppIcon.icns\" \"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources/AppIcon.icns\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		23E6DDF172901DC3E7FA2018 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -205,12 +249,15 @@
 			files = (
 				91A3F94B6A0AE5A2897D64A1 /* Config.swift in Sources */,
 				2EE917A1F2C4B3C78353EE8A /* Helpers.swift in Sources */,
+				E1F1F841F2CFE9BA0EA16D45 /* MockClusterData.swift in Sources */,
 				C57CA788F58DAD2576BFACFD /* Models.swift in Sources */,
+				B6826F3EBD4D710484B14A5C /* NotificationManager.swift in Sources */,
 				F7FAE03A7624807AD4E2B0A0 /* SSHRunner.swift in Sources */,
 				EDC6B4A2024D2133813213D6 /* SettingsView.swift in Sources */,
 				C74207D654398066406BE42C /* SlurmHUDApp.swift in Sources */,
 				CB40C3AD57A87C8C8EEAA4D0 /* StatusFetcher.swift in Sources */,
 				98D158557CBBB76E49FD043B /* StatusView.swift in Sources */,
+				FE5FB2477677629BA82F18D2 /* WatchStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -219,11 +266,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				883A211729CA689343B57F4A /* Config.swift in Sources */,
-				3165CE5950ADBA89F7AB0B8B /* Helpers.swift in Sources */,
+				D78B22801687491323263F42 /* MockClusterData.swift in Sources */,
 				6B7F3A62DFE7F31021D84A29 /* Models.swift in Sources */,
-				AE65084B7C48B2122C423DA2 /* SSHRunner.swift in Sources */,
 				C3E4255E3C1BF472F7AB8F41 /* SlurmHUDWidget.swift in Sources */,
-				7C1CCF0ADE3E6C6508B69558 /* StatusFetcher.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -241,6 +286,7 @@
 		06731388D2F896E95261BBF2 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Sources/SlurmHUDWidget/SlurmHUDWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 8XAD7C8Z68;
@@ -250,9 +296,9 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD.SlurmHUDWidget;
 				SDKROOT = macosx;
+				SLURMHUD_APP_GROUP_IDENTIFIER = "$(TeamIdentifierPrefix)com.jbauer.slurmhud.shared";
 			};
 			name = Release;
 		};
@@ -260,6 +306,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Sources/SlurmHUDApp/SlurmHUD.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 8XAD7C8Z68;
@@ -268,9 +315,9 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD;
 				SDKROOT = macosx;
+				SLURMHUD_APP_GROUP_IDENTIFIER = "$(TeamIdentifierPrefix)com.jbauer.slurmhud.shared";
 			};
 			name = Debug;
 		};
@@ -278,6 +325,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Sources/SlurmHUDApp/SlurmHUD.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 8XAD7C8Z68;
@@ -286,9 +334,9 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD;
 				SDKROOT = macosx;
+				SLURMHUD_APP_GROUP_IDENTIFIER = "$(TeamIdentifierPrefix)com.jbauer.slurmhud.shared";
 			};
 			name = Release;
 		};
@@ -358,6 +406,7 @@
 		D0C806B2F3C948F8919CAA86 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Sources/SlurmHUDWidget/SlurmHUDWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 8XAD7C8Z68;
@@ -367,9 +416,9 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD.SlurmHUDWidget;
 				SDKROOT = macosx;
+				SLURMHUD_APP_GROUP_IDENTIFIER = "$(TeamIdentifierPrefix)com.jbauer.slurmhud.shared";
 			};
 			name = Debug;
 		};

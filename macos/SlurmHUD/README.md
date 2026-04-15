@@ -6,16 +6,21 @@ menu bar app and a WidgetKit widget that fetch SLURM cluster status via SSH.
 
 Config
 ------
-- Config file: `~/.slurmhud.json`
+- Config file: shared App Group container (legacy `~/.slurmhud.json` is migrated on first launch)
 - Example:
   {
     "host": "mycluster",
     "refresh_seconds": 600,
-    "timeout_seconds": 10,
-    "command": "slurmcli-status -vv"
+    "timeout_seconds": 120,
+    "command": "slurmcli-status -vv",
+    "widget_partition": "gpu_lowp"
   }
 
-The app writes the config file when you save settings from the menu.
+The app writes config and widget cache data into an App Group container so the
+widget can read it reliably. Existing legacy files in your home directory are
+migrated automatically the first time the app or widget accesses them.
+Set `widget_partition` to show only one partition in the widget; omit it or
+leave it blank to show all partitions.
 
 Build (local)
 -------------
@@ -23,6 +28,18 @@ Build (local)
 2) Generate Xcode project:
    `xcodegen generate --spec project.yml`
 3) Open `SlurmHUD.xcodeproj` in Xcode and build/run.
+
+Signing / App Group
+-------------------
+- The widget can compile and preview without proper signing, but it will not be
+  able to read the shared config/cache unless `SlurmHUD` and `SlurmHUDWidget`
+  are signed with the same `Development Team`.
+- Both targets must also include the same `App Groups` entitlement entry.
+- If this is wrong, the widget typically shows the “Open SlurmHUD to fetch
+  cluster data.” state even while the app itself has live data.
+- After changing signing or App Group settings, run the `SlurmHUD` app scheme
+  once, refresh the app, then re-add the widget if macOS is still showing an
+  older timeline.
 
 Build (CLI)
 -----------

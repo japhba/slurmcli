@@ -263,6 +263,48 @@ def get_jobs_by_node() -> Dict[str, List[Dict[str, Any]]]:
     return by_node
 
 
+def get_pending_jobs_by_partition() -> Dict[str, List[Dict[str, Any]]]:
+    """Return pending (queued) jobs grouped by partition name."""
+    try:
+        # %i jobid, %u user, %j name, %P partition, %M elapsed (since submit),
+        # %l requested time limit, %D nodes requested, %r reason for waiting.
+        result = subprocess.run(
+            "squeue --all -h -t PD -o '%i|%u|%j|%P|%M|%l|%D|%r'",
+            shell=True,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return {}
+
+    by_part: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for line in result.stdout.strip().splitlines():
+        if '|' not in line:
+            continue
+        parts = line.split('|', 7)
+        if len(parts) < 8:
+            continue
+        jid_s, user, name, part, elapsed, time_limit, nodes_req, reason = parts
+        try:
+            jid = int(jid_s)
+        except Exception:
+            jid = None
+        by_part[part.strip()].append(
+            {
+                "id": jid,
+                "user": user.strip() or None,
+                "name": name.strip() or None,
+                "elapsed": _sanitize_time_field(elapsed),
+                "time_limit": _sanitize_time_field(time_limit),
+                "nodes_requested": nodes_req.strip() or None,
+                "reason": reason.strip() or None,
+            }
+        )
+    return by_part
+
+
 def get_node_user_map() -> Dict[str, set]:
     try:
         result = subprocess.run(
@@ -433,6 +475,7 @@ def build_cluster_snapshot(
         include_jobs=include_jobs,
         include_job_resources=include_job_resources,
     )
+    pending_by_partition = get_pending_jobs_by_partition() if include_jobs else {}
 
     partitions: List[Dict[str, Any]] = []
     for idx, pdata in sorted(parts.items()):
@@ -518,15 +561,19 @@ def build_cluster_snapshot(
                 }
             )
 
+        partition_name = pdata.get("partition")
+        pending_rows = pending_by_partition.get(partition_name or "", []) if include_jobs else []
+
         partitions.append(
             {
                 "idx": idx,
-                "partition": pdata.get("partition"),
+                "partition": partition_name,
                 "states": pdata.get("states") or [],
                 "cpu_info": pdata.get("cpu_info"),
                 "nodes": nodes,
                 "configs": config_rows,
                 "node_details": node_rows,
+                "pending_jobs": pending_rows,
             }
         )
 

@@ -12,8 +12,29 @@ struct Partition: Codable, Identifiable {
     let nodes: [String]?
     let configs: [PartitionConfig]?
     let node_details: [NodeDetail]?
+    var pending_jobs: [PendingJob]? = nil
 
     var id: String { partition ?? UUID().uuidString }
+}
+
+struct PendingJob: Codable {
+    let id: Int?
+    let user: String?
+    let name: String?
+    let elapsed: String?
+    let time_limit: String?
+    let nodes_requested: String?
+    let reason: String?
+
+    private let _uuid = UUID()
+
+    private enum CodingKeys: String, CodingKey {
+        case id, user, name, elapsed, time_limit, nodes_requested, reason
+    }
+
+    var jobIdentifier: String {
+        id.map(String.init) ?? _uuid.uuidString
+    }
 }
 
 struct PartitionConfig: Codable {

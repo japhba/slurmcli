@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var command: String = ""
     @State private var widgetPartition: String = ""
     @State private var useMockData = false
+    @State private var backgroundRefreshEnabled = true
 
     var body: some View {
         Form {
@@ -25,6 +26,11 @@ struct SettingsView: View {
                 .disabled(useMockData)
             TextField("Widget partition", text: $widgetPartition)
             Text("Leave blank to show all partitions in the widget.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Refresh widget in background", isOn: $backgroundRefreshEnabled)
+                .disabled(useMockData)
+            Text("Installs a LaunchAgent that runs the SSH fetch on the refresh cadence so the widget stays current even when SlurmHUD is closed. Logs land in ~/Library/Application Support/SlurmHUD/refresh.log.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if useMockData {
@@ -58,6 +64,7 @@ struct SettingsView: View {
         command = configStore.config.command
         widgetPartition = configStore.config.widgetPartition ?? ""
         useMockData = configStore.config.useMockData
+        backgroundRefreshEnabled = configStore.config.backgroundRefreshEnabled
     }
 
     private func save() {
@@ -70,7 +77,8 @@ struct SettingsView: View {
             timeoutSeconds: max(3, timeout),
             command: command.isEmpty ? configStore.config.command : command,
             widgetPartition: widgetPartition,
-            useMockData: useMockData
+            useMockData: useMockData,
+            backgroundRefreshEnabled: backgroundRefreshEnabled
         )
         configStore.save()
 
@@ -84,6 +92,12 @@ struct SettingsView: View {
             fetcher.snapshot = nil
             fetcher.lastError = waitingMessage
             SnapshotCache.saveError(waitingMessage)
+        }
+
+        if backgroundRefreshEnabled {
+            BackgroundRefreshAgent.install(config: configStore.config)
+        } else {
+            BackgroundRefreshAgent.uninstall()
         }
 
         #if canImport(WidgetKit)

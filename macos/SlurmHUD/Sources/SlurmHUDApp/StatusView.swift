@@ -126,6 +126,9 @@ struct StatusView: View {
                             Text("No node details available.")
                                 .foregroundColor(.secondary)
                         }
+                        if let pending = partition.pending_jobs, !pending.isEmpty {
+                            PendingJobsSection(jobs: pending)
+                        }
                     }
                     .padding()
                 }
@@ -234,26 +237,59 @@ struct NodeCellView: View {
         return watchStore.isWatched(name)
     }
 
+    private var stateLower: String {
+        (node.state ?? "").lowercased()
+    }
+
+    private var isProblematic: Bool {
+        stateLower.contains("drain") || stateLower.contains("down")
+    }
+
+    /// 0.0 = fully idle, 1.0 = fully allocated. Uses the max of CPU and GPU
+    /// utilization so a node with 1 GPU pinned still reads as busy.
+    private var loadFraction: Double {
+        if isProblematic { return 1.0 }
+
+        var fractions: [Double] = []
+        if let total = node.cpus_total, total > 0 {
+            fractions.append(Double(node.cpus_alloc ?? 0) / Double(total))
+        }
+        if let total = node.gpus_total, total > 0 {
+            fractions.append(Double(node.gpus_in_use ?? 0) / Double(total))
+        }
+
+        if let observed = fractions.max() {
+            return min(1.0, max(0.0, observed))
+        }
+
+        // Fall back to the textual state when we have no quantitative load.
+        if stateLower.contains("idle") { return 0.0 }
+        if stateLower.contains("mix") { return 0.5 }
+        if stateLower.contains("alloc") { return 1.0 }
+        return 0.5
+    }
+
+    /// Hue ramp: 120° (green) → 60° (yellow) → 30° (orange).
+    private func loadHue(saturation: Double, brightness: Double, opacity: Double) -> Color {
+        let t = loadFraction
+        let hueDegrees: Double
+        if t <= 0.5 {
+            hueDegrees = 120 - 60 * (t / 0.5)            // 120 → 60
+        } else {
+            hueDegrees = 60 - 30 * ((t - 0.5) / 0.5)     // 60  → 30
+        }
+        return Color(hue: hueDegrees / 360.0, saturation: saturation, brightness: brightness)
+            .opacity(opacity)
+    }
+
     private var stateColor: Color {
-        let state = (node.state ?? "").lowercased()
-        if state.contains("idle") {
-            return Color.green.opacity(0.25)
-        }
-        if state.contains("mix") {
-            return Color.green.opacity(0.15)
-        }
-        if state.contains("drain") || state.contains("down") {
-            return Color.red.opacity(0.2)
-        }
-        return Color.orange.opacity(0.2)
+        if isProblematic { return Color.red.opacity(0.20) }
+        return loadHue(saturation: 0.55, brightness: 0.95, opacity: 0.22)
     }
 
     private var stateBorderColor: Color {
-        let state = (node.state ?? "").lowercased()
-        if state.contains("idle") { return .green }
-        if state.contains("mix") { return .green.opacity(0.6) }
-        if state.contains("drain") || state.contains("down") { return .red }
-        return .orange
+        if isProblematic { return Color.red }
+        return loadHue(saturation: 0.70, brightness: 0.85, opacity: 0.85)
     }
 
     var body: some View {
@@ -286,12 +322,24 @@ struct NodeCellView: View {
 
             Divider()
 
-            // Resource summary
+            // Resource summary — explicit CPU / GPU / MEM labels
             HStack(spacing: 12) {
-                Label("\(node.cpus_alloc ?? 0)/\(node.cpus_total ?? 0)", systemImage: "cpu")
-                Label("\(node.gpus_in_use ?? 0)/\(node.gpus_total ?? 0)", systemImage: "rectangle.stack")
+                ResourceTag(
+                    icon: "cpu",
+                    label: "CPU",
+                    value: "\(node.cpus_alloc ?? 0)/\(node.cpus_total ?? 0)"
+                )
+                ResourceTag(
+                    icon: "cpu.fill",
+                    label: "GPU",
+                    value: "\(node.gpus_in_use ?? 0)/\(node.gpus_total ?? 0)"
+                )
                 if let mem = node.memory_gb {
-                    Label("\(Int(mem))GB", systemImage: "memorychip")
+                    ResourceTag(
+                        icon: "memorychip",
+                        label: "MEM",
+                        value: "\(Int(mem))GB"
+                    )
                 }
             }
             .font(.caption)
@@ -348,5 +396,96 @@ struct NodeCellView: View {
                 .stroke(stateBorderColor.opacity(0.5), lineWidth: 1)
         )
         .cornerRadius(8)
+    }
+}
+
+private struct ResourceTag: View {
+    let icon: String
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+            Text(label)
+                .fontWeight(.semibold)
+            Text(value)
+        }
+    }
+}
+
+struct PendingJobsSection: View {
+    let jobs: [PendingJob]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "hourglass")
+                Text("Queued jobs")
+                    .font(.headline)
+                Text("(\(jobs.count))")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.top, 8)
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 240), spacing: 8, alignment: .top)],
+                alignment: .leading,
+                spacing: 8
+            ) {
+                ForEach(jobs, id: \.jobIdentifier) { job in
+                    PendingJobCell(job: job)
+                }
+            }
+        }
+    }
+}
+
+private struct PendingJobCell: View {
+    let job: PendingJob
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(job.name ?? "unnamed")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .lineLimit(2)
+                Spacer()
+                if let user = job.user {
+                    Text(user)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            HStack(spacing: 8) {
+                if let elapsed = job.elapsed {
+                    Label(elapsed, systemImage: "clock")
+                }
+                if let limit = job.time_limit, limit != "UNLIMITED" {
+                    Label(limit, systemImage: "timer")
+                }
+                if let n = job.nodes_requested, n != "0" {
+                    Label("\(n) node\(n == "1" ? "" : "s")", systemImage: "server.rack")
+                }
+            }
+            .font(.caption2)
+            .foregroundColor(.secondary)
+            if let reason = job.reason, !reason.isEmpty, reason != "None" {
+                Text("Waiting: \(reason)")
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .lineLimit(2)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.yellow.opacity(0.10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.yellow.opacity(0.45), lineWidth: 1)
+        )
+        .cornerRadius(6)
     }
 }

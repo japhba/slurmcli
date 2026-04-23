@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		039BAF7DEE2A14590E94CFED /* BackgroundRefreshAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90D678570E68D7B262BBCDFA /* BackgroundRefreshAgent.swift */; };
 		2EA8A28A349743BDC03E26E6 /* SlurmHUDWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B296F1568362AFC5F0AA3774 /* SlurmHUDWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2EE917A1F2C4B3C78353EE8A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */; };
 		6B7F3A62DFE7F31021D84A29 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8FFEB2916E988CF93EDD54A /* Models.swift */; };
@@ -62,6 +63,7 @@
 		758E8E2CDB2AFEDEA75A471D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
 		9028F490529615E92F73F354 /* MockClusterData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockClusterData.swift; sourceTree = "<group>"; };
+		90D678570E68D7B262BBCDFA /* BackgroundRefreshAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRefreshAgent.swift; sourceTree = "<group>"; };
 		B296F1568362AFC5F0AA3774 /* SlurmHUDWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SlurmHUDWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B4127DE2A6B9FACD5D5ABDE9 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
 		BDCA8DC2E9FE47CF46222EF4 /* SlurmHUD.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SlurmHUD.entitlements; sourceTree = "<group>"; };
@@ -123,6 +125,7 @@
 			isa = PBXGroup;
 			children = (
 				B4127DE2A6B9FACD5D5ABDE9 /* AppIcon.icns */,
+				90D678570E68D7B262BBCDFA /* BackgroundRefreshAgent.swift */,
 				CD85FFD788E21166230A1B3D /* Info.plist */,
 				2DDF7244D503C8066EFE6400 /* SettingsView.swift */,
 				BDCA8DC2E9FE47CF46222EF4 /* SlurmHUD.entitlements */,
@@ -247,6 +250,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				039BAF7DEE2A14590E94CFED /* BackgroundRefreshAgent.swift in Sources */,
 				91A3F94B6A0AE5A2897D64A1 /* Config.swift in Sources */,
 				2EE917A1F2C4B3C78353EE8A /* Helpers.swift in Sources */,
 				E1F1F841F2CFE9BA0EA16D45 /* MockClusterData.swift in Sources */,
@@ -289,7 +293,6 @@
 				CODE_SIGN_ENTITLEMENTS = Sources/SlurmHUDWidget/SlurmHUDWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				DEVELOPMENT_TEAM = 8XAD7C8Z68;
 				INFOPLIST_FILE = Sources/SlurmHUDWidget/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -409,7 +412,6 @@
 				CODE_SIGN_ENTITLEMENTS = Sources/SlurmHUDWidget/SlurmHUDWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				DEVELOPMENT_TEAM = 8XAD7C8Z68;
 				INFOPLIST_FILE = Sources/SlurmHUDWidget/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

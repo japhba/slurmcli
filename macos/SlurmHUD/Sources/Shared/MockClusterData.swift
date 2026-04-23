@@ -108,6 +108,26 @@ enum MockClusterData {
                                 )
                             ]
                         )
+                    ],
+                    pending_jobs: [
+                        PendingJob(
+                            id: 901,
+                            user: "eve",
+                            name: "hpo-sweep",
+                            elapsed: "00:14:00",
+                            time_limit: "08:00:00",
+                            nodes_requested: "2",
+                            reason: "Resources"
+                        ),
+                        PendingJob(
+                            id: 902,
+                            user: "frank",
+                            name: "eval",
+                            elapsed: "00:02:00",
+                            time_limit: "01:00:00",
+                            nodes_requested: "1",
+                            reason: "Priority"
+                        )
                     ]
                 ),
                 Partition(

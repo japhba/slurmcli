@@ -31,7 +31,13 @@ struct SlurmProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<SlurmEntry>) -> Void) {
         let entry = loadEntry()
-        let nextRefresh = Date().addingTimeInterval(15 * 60)
+        let config = ConfigStore.loadShared() ?? .default
+        let cadence = max(60, config.refreshSeconds)
+        let scheduledRefresh = (entry.lastUpdated ?? entry.date).addingTimeInterval(Double(cadence))
+        let nextRefresh =
+            scheduledRefresh > Date()
+            ? scheduledRefresh
+            : Date().addingTimeInterval(min(Double(cadence), 60))
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
     }
 
@@ -1125,25 +1131,25 @@ struct SlurmHUDWidgetView: View {
     private var cardFillColor: Color {
         guard showsBackground else { return .clear }
         if renderingMode == .vibrant {
-            return colorScheme == .dark ? Color.white.opacity(0.14) : Color.white.opacity(0.30)
+            return colorScheme == .dark ? Color.white.opacity(0.12) : Color.white.opacity(0.28)
         }
         return colorScheme == .dark
-            ? Color.white.opacity(0.10)
-            : Color.white.opacity(0.56)
+            ? Color.white.opacity(0.15)
+            : Color.white.opacity(0.52)
     }
 
     private var cardStrokeColor: Color {
         if colorScheme == .dark {
-            return Color.white.opacity(renderingMode == .vibrant ? 0.24 : 0.12)
+            return Color.white.opacity(renderingMode == .vibrant ? 0.22 : 0.16)
         }
-        return Color(red: 0.18, green: 0.28, blue: 0.36).opacity(renderingMode == .vibrant ? 0.18 : 0.12)
+        return Color.white.opacity(renderingMode == .vibrant ? 0.24 : 0.42)
     }
 
     private var jobFillColor: Color {
         if usesCustomBackdrop {
             return colorScheme == .dark
                 ? Color.white.opacity(0.09)
-                : Color.white.opacity(0.72)
+                : Color.white.opacity(0.44)
         }
         return Color.primary.opacity(0.05)
     }
@@ -1151,8 +1157,8 @@ struct SlurmHUDWidgetView: View {
     private var jobStrokeColor: Color {
         if usesCustomBackdrop {
             return colorScheme == .dark
-                ? Color.white.opacity(0.14)
-                : Color.black.opacity(0.08)
+                ? Color.white.opacity(0.12)
+                : Color.white.opacity(0.32)
         }
         return Color.primary.opacity(0.08)
     }
@@ -1171,7 +1177,7 @@ struct SlurmHUDWidgetView: View {
             return Color.red.opacity(strongBackdrop ? 0.18 : 0.12)
         case .neutral:
             if usesCustomBackdrop {
-                return colorScheme == .dark ? Color.white.opacity(0.07) : Color.white.opacity(0.42)
+                return colorScheme == .dark ? Color.white.opacity(0.11) : Color.white.opacity(0.36)
             }
             return Color.primary.opacity(0.04)
         }
@@ -1189,7 +1195,7 @@ struct SlurmHUDWidgetView: View {
             return Color.red.opacity(usesCustomBackdrop && colorScheme == .dark ? 0.50 : 0.26)
         case .neutral:
             if usesCustomBackdrop {
-                return colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.10)
+                return colorScheme == .dark ? Color.white.opacity(0.12) : Color.white.opacity(0.28)
             }
             return Color.primary.opacity(0.10)
         }
@@ -1221,48 +1227,37 @@ private struct WidgetBackdrop: View {
         } else {
             ZStack {
                 if colorScheme == .dark {
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.09, green: 0.12, blue: 0.18),
-                            Color(red: 0.03, green: 0.06, blue: 0.10)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-
-                    Circle()
-                        .fill(Color(red: 0.22, green: 0.69, blue: 0.77).opacity(0.28))
-                        .frame(width: 180, height: 180)
-                        .blur(radius: 26)
-                        .offset(x: 80, y: -75)
-
-                    Circle()
-                        .fill(Color.white.opacity(0.10))
-                        .frame(width: 120, height: 120)
-                        .blur(radius: 18)
-                        .offset(x: -95, y: 80)
+                    Rectangle()
+                        .fill(.thinMaterial)
                 } else {
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.93, green: 0.96, blue: 0.99),
-                            Color(red: 0.84, green: 0.90, blue: 0.96)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                    Rectangle()
+                        .fill(.regularMaterial)
+                }
+
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: colorScheme == .dark
+                                ? [
+                                    Color.white.opacity(0.035),
+                                    Color.white.opacity(0.008)
+                                ]
+                                : [
+                                    Color.white.opacity(0.18),
+                                    Color.white.opacity(0.04)
+                                ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
 
-                    Circle()
-                        .fill(Color(red: 0.22, green: 0.69, blue: 0.77).opacity(0.16))
-                        .frame(width: 180, height: 180)
-                        .blur(radius: 28)
-                        .offset(x: 90, y: -80)
-
-                    Circle()
-                        .fill(Color.white.opacity(0.55))
-                        .frame(width: 140, height: 140)
-                        .blur(radius: 20)
-                        .offset(x: -90, y: 72)
-                }
+                Rectangle()
+                    .strokeBorder(
+                        colorScheme == .dark
+                            ? Color.white.opacity(0.16)
+                            : Color.white.opacity(0.42),
+                        lineWidth: 1
+                    )
             }
         }
     }

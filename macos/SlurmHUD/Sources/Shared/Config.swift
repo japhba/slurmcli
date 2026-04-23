@@ -7,6 +7,7 @@ struct SlurmHUDConfig: Codable {
     var command: String
     var widgetPartition: String?
     var useMockData: Bool
+    var backgroundRefreshEnabled: Bool
 
     init(
         host: String,
@@ -14,7 +15,8 @@ struct SlurmHUDConfig: Codable {
         timeoutSeconds: Int,
         command: String,
         widgetPartition: String? = nil,
-        useMockData: Bool = false
+        useMockData: Bool = false,
+        backgroundRefreshEnabled: Bool = true
     ) {
         self.host = host
         self.refreshSeconds = refreshSeconds
@@ -22,15 +24,17 @@ struct SlurmHUDConfig: Codable {
         self.command = command
         self.widgetPartition = Self.normalizedWidgetPartition(widgetPartition)
         self.useMockData = useMockData
+        self.backgroundRefreshEnabled = backgroundRefreshEnabled
     }
 
     static let `default` = SlurmHUDConfig(
         host: "mycluster",
         refreshSeconds: 600,
-        timeoutSeconds: 120,
+        timeoutSeconds: 180,
         command: "slurmcli-status -vvvv",
         widgetPartition: "gpu_lowp",
-        useMockData: true
+        useMockData: true,
+        backgroundRefreshEnabled: true
     )
 
     private enum CodingKeys: String, CodingKey {
@@ -40,6 +44,7 @@ struct SlurmHUDConfig: Codable {
         case command
         case widgetPartition
         case useMockData
+        case backgroundRefreshEnabled
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
@@ -49,6 +54,7 @@ struct SlurmHUDConfig: Codable {
         case command
         case widget_partition
         case use_mock_data
+        case background_refresh_enabled
     }
 
     init(from decoder: Decoder) throws {
@@ -84,6 +90,10 @@ struct SlurmHUDConfig: Codable {
             try container.decodeIfPresent(Bool.self, forKey: .useMockData)
             ?? legacyContainer.decodeIfPresent(Bool.self, forKey: .use_mock_data)
             ?? false
+        self.backgroundRefreshEnabled =
+            try container.decodeIfPresent(Bool.self, forKey: .backgroundRefreshEnabled)
+            ?? legacyContainer.decodeIfPresent(Bool.self, forKey: .background_refresh_enabled)
+            ?? Self.default.backgroundRefreshEnabled
     }
 
     func encode(to encoder: Encoder) throws {
@@ -94,6 +104,7 @@ struct SlurmHUDConfig: Codable {
         try container.encode(command, forKey: .command)
         try container.encode(widgetPartition ?? "", forKey: .widgetPartition)
         try container.encode(useMockData, forKey: .useMockData)
+        try container.encode(backgroundRefreshEnabled, forKey: .backgroundRefreshEnabled)
     }
 
     private static func normalizedWidgetPartition(_ raw: String?) -> String? {
@@ -308,8 +319,12 @@ struct CachedSnapshot: Codable {
 }
 
 final class SnapshotCache {
-    private static var cacheURL: URL {
+    static var cacheURL: URL {
         SharedContainer.cacheURL()
+    }
+
+    static var allCacheURLs: [URL] {
+        SharedContainer.cacheURLs()
     }
 
     static func save(snapshot: ClusterSnapshot, error: String? = nil) {

@@ -119,168 +119,137 @@ private let defaultAppGroupIdentifier = "com.jbauer.slurmhud.shared"
 private let configFileName = ".slurmhud.json"
 private let cacheFileName = ".slurmhud-cache.json"
 
-private func homeDirectory() -> URL {
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    if !home.path.isEmpty {
-        return home
-    }
-    if let environmentHome = ProcessInfo.processInfo.environment["HOME"] {
-        return URL(fileURLWithPath: environmentHome)
-    }
-    return URL(fileURLWithPath: NSHomeDirectory())
-}
-
+/// Single source of truth for the App Group container path.
+///
+/// We resolve exactly one identifier (from `Bundle.main`'s Info.plist,
+/// falling back to a hardcoded default only if that's missing) and use
+/// `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)` to
+/// get the canonical container URL for the running process. No fallback
+/// to a manually-constructed `~/Library/Group Containers/X` path, no
+/// iteration over multiple bundles' identifiers, no legacy `~/.slurmhud*`
+/// paths, no multi-path writes.
+///
+/// All those fallbacks were what caused the recurring "SlurmHUD would
+/// like to access data from other apps" TCC prompts: every time a
+/// non-entitled path was touched (because the running process's
+/// entitlement only covers its own group ID), macOS asked for permission.
+/// One identifier, one entitlement, one container — no prompts.
 private enum SharedContainer {
     private static let fileManager = FileManager.default
 
+    /// One-time migration from any historical container layouts to the
+    /// resolved one. Done lazily on first access so the (potentially TCC-
+    /// prompting) read of legacy paths only happens once per install.
+    private static let migrate: Void = {
+        runMigration()
+    }()
+
+    static var groupIdentifier: String {
+        if let raw = Bundle.main.object(forInfoDictionaryKey: appGroupInfoKey) as? String {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, !trimmed.contains("$(") {
+                return trimmed
+            }
+        }
+        return defaultAppGroupIdentifier
+    }
+
+    /// Container URL without triggering migration. Used by both the
+    /// public accessors and `runMigration` itself, so migration can
+    /// resolve the destination path without re-entering the lazy
+    /// initializer that drives it.
+    private static var rawContainerURL: URL {
+        if let url = fileManager.containerURL(forSecurityApplicationGroupIdentifier: groupIdentifier) {
+            return url
+        }
+        // Last-resort path. If we ever land here it means the current
+        // process has no App Group entitlement — accessing this path will
+        // most likely fail. We deliberately don't try alternate IDs;
+        // failing visibly is better than dragging in a TCC prompt.
+        return fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Group Containers", isDirectory: true)
+            .appendingPathComponent(groupIdentifier, isDirectory: true)
+    }
+
+    static var containerURL: URL {
+        _ = migrate
+        return rawContainerURL
+    }
+
     static func configURL() -> URL {
-        preferredURL(for: configFileName)
+        containerURL.appendingPathComponent(configFileName, isDirectory: false)
     }
 
     static func cacheURL() -> URL {
-        preferredURL(for: cacheFileName)
-    }
-
-    static func configURLs() -> [URL] {
-        candidateURLs(for: configFileName)
-    }
-
-    static func cacheURLs() -> [URL] {
-        candidateURLs(for: cacheFileName)
+        containerURL.appendingPathComponent(cacheFileName, isDirectory: false)
     }
 
     static func loadConfigData() -> Data? {
-        loadMostRecentData(from: configURLs())
+        try? Data(contentsOf: configURL())
     }
 
     static func saveConfigData(_ data: Data) {
-        writeData(data, to: configURLs())
+        writeAtomically(data, to: configURL())
     }
 
     static func loadCacheData() -> Data? {
-        loadMostRecentData(from: cacheURLs())
+        try? Data(contentsOf: cacheURL())
     }
 
     static func saveCacheData(_ data: Data) {
-        writeData(data, to: cacheURLs())
+        writeAtomically(data, to: cacheURL())
     }
 
-    private static func preferredURL(for fileName: String) -> URL {
-        candidateURLs(for: fileName).first ?? legacyURL(for: fileName)
-    }
-
-    private static func candidateURLs(for fileName: String) -> [URL] {
-        let legacyURL = legacyURL(for: fileName)
-        var urls: [URL] = []
-
-        for groupID in appGroupIdentifiers {
-            if let containerURL = fileManager.containerURL(forSecurityApplicationGroupIdentifier: groupID) {
-                let sharedURL = containerURL.appendingPathComponent(fileName, isDirectory: false)
-                migrateIfNeeded(from: legacyURL, to: sharedURL)
-                appendUnique(sharedURL, to: &urls)
-            }
-
-            let directURL = homeDirectory()
-                .appendingPathComponent("Library/Group Containers", isDirectory: true)
-                .appendingPathComponent(groupID, isDirectory: true)
-                .appendingPathComponent(fileName, isDirectory: false)
-            migrateIfNeeded(from: legacyURL, to: directURL)
-            appendUnique(directURL, to: &urls)
-        }
-
-        appendUnique(legacyURL, to: &urls)
-        return urls
-    }
-
-    private static var appGroupIdentifiers: [String] {
-        let bundles = [Bundle.main] + Bundle.allBundles + Bundle.allFrameworks
-        var identifiers: [String] = []
-
-        for bundle in bundles {
-            guard let raw = bundle.object(forInfoDictionaryKey: appGroupInfoKey) as? String else {
-                continue
-            }
-
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, !trimmed.contains("$(") else {
-                continue
-            }
-
-            if !identifiers.contains(trimmed) {
-                identifiers.append(trimmed)
-            }
-        }
-
-        if !identifiers.contains(defaultAppGroupIdentifier) {
-            identifiers.append(defaultAppGroupIdentifier)
-        }
-
-        return identifiers
-    }
-
-    private static func legacyURL(for fileName: String) -> URL {
-        homeDirectory().appendingPathComponent(fileName)
-    }
-
-    private static func appendUnique(_ url: URL, to urls: inout [URL]) {
-        let path = url.standardizedFileURL.path
-        guard !urls.contains(where: { $0.standardizedFileURL.path == path }) else { return }
-        urls.append(url)
-    }
-
-    private static func loadMostRecentData(from urls: [URL]) -> Data? {
-        let orderedCandidates = urls.enumerated()
-            .filter { fileManager.fileExists(atPath: $0.element.path) }
-            .sorted { lhs, rhs in
-                let lhsDate = modificationDate(for: lhs.element)
-                let rhsDate = modificationDate(for: rhs.element)
-                if lhsDate != rhsDate {
-                    return lhsDate > rhsDate
-                }
-                return lhs.offset < rhs.offset
-            }
-
-        for (_, url) in orderedCandidates {
-            if let data = try? Data(contentsOf: url) {
-                return data
-            }
-        }
-
-        return nil
-    }
-
-    private static func modificationDate(for url: URL) -> Date {
-        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-        return values?.contentModificationDate ?? .distantPast
-    }
-
-    private static func writeData(_ data: Data, to urls: [URL]) {
-        for url in urls {
-            do {
-                try fileManager.createDirectory(
-                    at: url.deletingLastPathComponent(),
-                    withIntermediateDirectories: true,
-                    attributes: nil
-                )
-                try data.write(to: url, options: .atomic)
-            } catch {
-                continue
-            }
-        }
-    }
-
-    private static func migrateIfNeeded(from legacyURL: URL, to sharedURL: URL) {
-        guard !fileManager.fileExists(atPath: sharedURL.path) else { return }
-        guard fileManager.fileExists(atPath: legacyURL.path) else { return }
-
+    private static func writeAtomically(_ data: Data, to url: URL) {
         do {
             try fileManager.createDirectory(
-                at: sharedURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true,
-                attributes: nil
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
             )
-            try fileManager.copyItem(at: legacyURL, to: sharedURL)
+            try data.write(to: url, options: .atomic)
         } catch {
+            NSLog("SharedContainer: failed to write \(url.path): \(error)")
+        }
+    }
+
+    /// One-time copy of config from any pre-existing container layout.
+    /// We deliberately only migrate the config (small, painful to lose),
+    /// not the cache (ephemeral, gets rewritten on the next refresh).
+    private static func runMigration() {
+        let target = rawContainerURL.appendingPathComponent(configFileName, isDirectory: false)
+        guard !fileManager.fileExists(atPath: target.path) else { return }
+
+        let home = fileManager.homeDirectoryForCurrentUser
+        let groupContainers = home.appendingPathComponent("Library/Group Containers", isDirectory: true)
+        var sources: [URL] = []
+
+        // Historical sibling Group Containers (e.g. team-prefixed
+        // 8XAD7C8Z68.com.jbauer.slurmhud.shared) that an earlier version
+        // of the app created on this machine.
+        if let entries = try? fileManager.contentsOfDirectory(
+            at: groupContainers,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for entry in entries {
+                if entry.lastPathComponent.hasSuffix(".com.jbauer.slurmhud.shared")
+                    || entry.lastPathComponent == "com.jbauer.slurmhud.shared" {
+                    let candidate = entry.appendingPathComponent(configFileName, isDirectory: false)
+                    if candidate.standardizedFileURL.path != target.standardizedFileURL.path {
+                        sources.append(candidate)
+                    }
+                }
+            }
+        }
+
+        // Pre-App-Group fallback that very old builds wrote to.
+        sources.append(home.appendingPathComponent(configFileName))
+
+        for source in sources {
+            guard fileManager.fileExists(atPath: source.path),
+                  let data = try? Data(contentsOf: source) else { continue }
+            writeAtomically(data, to: target)
+            NSLog("SharedContainer: migrated config from \(source.path) -> \(target.path)")
             return
         }
     }
@@ -321,10 +290,6 @@ struct CachedSnapshot: Codable {
 final class SnapshotCache {
     static var cacheURL: URL {
         SharedContainer.cacheURL()
-    }
-
-    static var allCacheURLs: [URL] {
-        SharedContainer.cacheURLs()
     }
 
     static func save(snapshot: ClusterSnapshot, error: String? = nil) {
@@ -389,8 +354,6 @@ final class SnapshotCache {
     }
 
     static func clear() {
-        for url in SharedContainer.cacheURLs() {
-            try? FileManager.default.removeItem(at: url)
-        }
+        try? FileManager.default.removeItem(at: SharedContainer.cacheURL())
     }
 }

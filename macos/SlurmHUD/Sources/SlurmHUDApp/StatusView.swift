@@ -349,13 +349,15 @@ struct NodeCellView: View {
                 Text(gpuLabel)
                     .font(.caption)
                     .foregroundColor(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
                     .textSelection(.enabled)
             }
 
             // Jobs list
             if let jobs = node.jobs, !jobs.isEmpty {
                 Divider()
-                ForEach(jobs) { job in
+                ForEach(jobs, id: \.jobIdentifier) { job in
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
                             Text(job.name ?? "unnamed")
@@ -389,7 +391,7 @@ struct NodeCellView: View {
             }
         }
         .padding(10)
-        .frame(minWidth: 240, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(minWidth: 240, maxWidth: .infinity, alignment: .topLeading)
         .background(stateColor)
         .overlay(
             RoundedRectangle(cornerRadius: 8)

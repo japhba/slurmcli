@@ -1,6 +1,5 @@
 import SwiftUI
 
-@main
 struct SlurmHUDApp: App {
     @StateObject private var configStore = ConfigStore()
     @StateObject private var fetcher = StatusFetcher()
@@ -42,5 +41,16 @@ struct SlurmHUDApp: App {
         } else {
             BackgroundRefreshAgent.uninstall()
         }
+    }
+}
+
+@main
+enum AppEntry {
+    static func main() {
+        if CommandLine.arguments.contains(RefreshCacheCommand.flag) {
+            let status = RefreshCacheCommand.run()
+            exit(status)
+        }
+        SlurmHUDApp.main()
     }
 }

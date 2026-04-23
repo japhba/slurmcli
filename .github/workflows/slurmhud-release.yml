@@ -1,0 +1,102 @@
+name: SlurmHUD release
+
+on:
+  push:
+    tags:
+      - "slurmhud-v*"
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional tag/name to label this build (no release is created without a real tag push)"
+        required: false
+        default: "manual"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          xcodegen --version
+
+      - name: Build SlurmHUD.app
+        working-directory: macos/SlurmHUD
+        run: make rebuild
+
+      - name: Verify build artifact
+        id: verify
+        run: |
+          APP_PATH=/tmp/slurmhud-derived/Build/Products/Debug/SlurmHUD.app
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::Expected SlurmHUD.app at $APP_PATH but it is missing"
+            exit 1
+          fi
+          # Sanity-check the widget appex is embedded.
+          if [ ! -d "$APP_PATH/Contents/PlugIns/SlurmHUDWidget.appex" ]; then
+            echo "::error::Widget extension is not embedded inside SlurmHUD.app"
+            exit 1
+          fi
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Package SlurmHUD.app
+        id: package
+        run: |
+          # ditto preserves resource forks, symlinks and extended attributes,
+          # which `zip` would mangle on macOS bundles.
+          REF_NAME="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          ZIP_NAME="SlurmHUD-${REF_NAME}.zip"
+          ditto -c -k --keepParent "${{ steps.verify.outputs.app_path }}" "$GITHUB_WORKSPACE/$ZIP_NAME"
+          ls -lh "$GITHUB_WORKSPACE/$ZIP_NAME"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "zip_path=$GITHUB_WORKSPACE/$ZIP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.zip_name }}
+          path: ${{ steps.package.outputs.zip_path }}
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## SlurmHUD ${{ github.ref_name }}
+
+          Unsigned macOS build. Apple Silicon required (arm64).
+
+          ### Install
+          1. Download `${{ steps.package.outputs.zip_name }}` below and unzip.
+          2. Drag `SlurmHUD.app` to `/Applications`.
+          3. Because this build is not Developer-ID signed, macOS will refuse the first launch. **Either** right-click the app and choose **Open** → **Open** in the dialog, **or** run once in Terminal:
+             ```sh
+             xattr -dr com.apple.quarantine /Applications/SlurmHUD.app
+             ```
+          4. Open SlurmHUD, fill in **Settings → SSH host** and **Command**, then enable the widget from Notification Center / desktop.
+
+          ### Background refresh
+          SlurmHUD installs a per-user LaunchAgent (`~/Library/LaunchAgents/com.jbauer.slurmhud.refresh.plist`) that runs the binary in `--refresh-cache` mode on the configured cadence so the widget stays current while the app is closed. Logs land in `~/Library/Application Support/SlurmHUD/refresh.log`.
+
+          ---
+          Built from commit ${{ github.sha }}.
+          EOF
+
+          gh release create "${{ github.ref_name }}" \
+            --title "SlurmHUD ${{ github.ref_name }}" \
+            --notes-file release-notes.md \
+            "${{ steps.package.outputs.zip_path }}"

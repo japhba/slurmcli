@@ -17,8 +17,6 @@ build:
 		-scheme $(SCHEME) \
 		-configuration Debug \
 		-derivedDataPath $(DERIVED_DATA) \
-		CODE_SIGNING_ALLOWED=NO \
-		CODE_SIGNING_REQUIRED=NO \
 		build
 	$(MAKE) sign
 
@@ -28,8 +26,6 @@ build-widget:
 		-scheme SlurmHUDWidget \
 		-configuration Debug \
 		-derivedDataPath $(DERIVED_DATA)-widget \
-		CODE_SIGNING_ALLOWED=NO \
-		CODE_SIGNING_REQUIRED=NO \
 		build
 
 # Re-sign the app and widget ad-hoc with the App Group entitlement embedded.

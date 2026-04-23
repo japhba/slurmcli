@@ -25,9 +25,21 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jbauer.SlurmHUD
-        CODE_SIGN_STYLE: Automatic
+        # Force ad-hoc signing for every build — Xcode IDE included — so
+        # `make` builds and Xcode builds produce identical entitlements.
+        # Mixing team-signed (Apple Development → 8XAD7C8Z68 prefix on the
+        # App Group) and ad-hoc-signed builds caused two different
+        # `~/Library/Group Containers/...` paths to coexist, which is
+        # what triggered the recurring "would like to access data from
+        # other apps" TCC prompts.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_ENTITLEMENTS: Sources/SlurmHUDApp/SlurmHUD.entitlements
-        SLURMHUD_APP_GROUP_IDENTIFIER: $(TeamIdentifierPrefix)com.jbauer.slurmhud.shared
+        DEVELOPMENT_TEAM: ""
+        # Intentionally NOT $(TeamIdentifierPrefix)-prefixed for the same
+        # reason: a bare identifier keeps local builds and CI builds
+        # pointing at the same App Group container.
+        SLURMHUD_APP_GROUP_IDENTIFIER: com.jbauer.slurmhud.shared
     postBuildScripts:
       - script: |
           cp "${SRCROOT}/Sources/SlurmHUDApp/AppIcon.icns" "${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources/AppIcon.icns"
@@ -53,6 +65,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jbauer.SlurmHUD.SlurmHUDWidget
-        CODE_SIGN_STYLE: Automatic
+        # Match the parent app: ad-hoc only, no team. See the comment on
+        # the SlurmHUD target for the full rationale.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_ENTITLEMENTS: Sources/SlurmHUDWidget/SlurmHUDWidget.entitlements
-        SLURMHUD_APP_GROUP_IDENTIFIER: $(TeamIdentifierPrefix)com.jbauer.slurmhud.shared
+        DEVELOPMENT_TEAM: ""
+        SLURMHUD_APP_GROUP_IDENTIFIER: com.jbauer.slurmhud.shared

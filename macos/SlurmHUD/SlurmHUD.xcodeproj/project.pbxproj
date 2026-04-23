@@ -10,6 +10,7 @@
 		039BAF7DEE2A14590E94CFED /* BackgroundRefreshAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90D678570E68D7B262BBCDFA /* BackgroundRefreshAgent.swift */; };
 		2EA8A28A349743BDC03E26E6 /* SlurmHUDWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B296F1568362AFC5F0AA3774 /* SlurmHUDWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2EE917A1F2C4B3C78353EE8A /* Helpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB9BC0095A04E4A8CE094E3 /* Helpers.swift */; };
+		3E634D178DBB42D32449EE93 /* RefreshCacheCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BA7E795D48C25FA33CD4251 /* RefreshCacheCommand.swift */; };
 		6B7F3A62DFE7F31021D84A29 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8FFEB2916E988CF93EDD54A /* Models.swift */; };
 		883A211729CA689343B57F4A /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59A31133703E85DBB85CCEDA /* Config.swift */; };
 		91A3F94B6A0AE5A2897D64A1 /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59A31133703E85DBB85CCEDA /* Config.swift */; };
@@ -52,6 +53,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		0BA7E795D48C25FA33CD4251 /* RefreshCacheCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshCacheCommand.swift; sourceTree = "<group>"; };
 		261341808EC12D1FF6381325 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
 		2DDF7244D503C8066EFE6400 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		31A23D88138AD89C6871438B /* StatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusView.swift; sourceTree = "<group>"; };
@@ -127,6 +129,7 @@
 				B4127DE2A6B9FACD5D5ABDE9 /* AppIcon.icns */,
 				90D678570E68D7B262BBCDFA /* BackgroundRefreshAgent.swift */,
 				CD85FFD788E21166230A1B3D /* Info.plist */,
+				0BA7E795D48C25FA33CD4251 /* RefreshCacheCommand.swift */,
 				2DDF7244D503C8066EFE6400 /* SettingsView.swift */,
 				BDCA8DC2E9FE47CF46222EF4 /* SlurmHUD.entitlements */,
 				63B652A546791EB6847E6E0B /* SlurmHUDApp.swift */,
@@ -256,6 +259,7 @@
 				E1F1F841F2CFE9BA0EA16D45 /* MockClusterData.swift in Sources */,
 				C57CA788F58DAD2576BFACFD /* Models.swift in Sources */,
 				B6826F3EBD4D710484B14A5C /* NotificationManager.swift in Sources */,
+				3E634D178DBB42D32449EE93 /* RefreshCacheCommand.swift in Sources */,
 				F7FAE03A7624807AD4E2B0A0 /* SSHRunner.swift in Sources */,
 				EDC6B4A2024D2133813213D6 /* SettingsView.swift in Sources */,
 				C74207D654398066406BE42C /* SlurmHUDApp.swift in Sources */,
@@ -291,8 +295,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Sources/SlurmHUDWidget/SlurmHUDWidget.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 8XAD7C8Z68;
 				INFOPLIST_FILE = Sources/SlurmHUDWidget/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -310,6 +316,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Sources/SlurmHUDApp/SlurmHUD.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 8XAD7C8Z68;
@@ -329,6 +336,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Sources/SlurmHUDApp/SlurmHUD.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 8XAD7C8Z68;
@@ -410,8 +418,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Sources/SlurmHUDWidget/SlurmHUDWidget.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 8XAD7C8Z68;
 				INFOPLIST_FILE = Sources/SlurmHUDWidget/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

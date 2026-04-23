@@ -14,7 +14,17 @@ struct Partition: Codable, Identifiable {
     let node_details: [NodeDetail]?
     var pending_jobs: [PendingJob]? = nil
 
-    var id: String { partition ?? UUID().uuidString }
+    /// Stable per-instance UUID used as the `id` fallback when `partition`
+    /// is nil. Critical: do NOT compute a fresh UUID inside the `id`
+    /// getter — SwiftUI calls `id` repeatedly during diffing, and a new
+    /// value each call sends ForEach into an infinite re-render loop.
+    private let _uuid = UUID()
+
+    private enum CodingKeys: String, CodingKey {
+        case idx, partition, states, nodes, configs, node_details, pending_jobs
+    }
+
+    var id: String { partition ?? _uuid.uuidString }
 }
 
 struct PendingJob: Codable {
@@ -61,7 +71,15 @@ struct NodeDetail: Codable, Identifiable {
     let users: [String]?
     let jobs: [JobDetail]?
 
-    var id: String { node ?? UUID().uuidString }
+    /// See note on `Partition._uuid`: must be stable per-instance.
+    private let _uuid = UUID()
+
+    private enum CodingKeys: String, CodingKey {
+        case node, state, memory_gb, cpus_alloc, cpus_total
+        case gpus_in_use, gpus_total, gpu_label_text, users, jobs
+    }
+
+    var id: String { node ?? _uuid.uuidString }
 }
 
 struct JobDetail: Codable, Identifiable {
@@ -72,4 +90,15 @@ struct JobDetail: Codable, Identifiable {
     let time_left: String?
     let time_info: String?
     let resource_summary: String?
+
+    /// Stable per-instance UUID for ForEach when `id` is missing.
+    private let _uuid = UUID()
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, user, elapsed, time_left, time_info, resource_summary
+    }
+
+    var jobIdentifier: String {
+        id.map(String.init) ?? _uuid.uuidString
+    }
 }

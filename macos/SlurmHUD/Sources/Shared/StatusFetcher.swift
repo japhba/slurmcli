@@ -18,6 +18,28 @@ final class StatusFetcher: ObservableObject {
     private let decoder = JSONDecoder()
     private static let maxLogEntries = 50
 
+    private static func describe(_ error: Error) -> String {
+        if let sshError = error as? SSHRunnerError {
+            switch sshError {
+            case .failedToLaunch:
+                return "Failed to launch /usr/bin/ssh"
+            case .timeout(let elapsed, let stderr):
+                let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    return String(format: "ssh wall-clock timeout after %.1fs", elapsed)
+                }
+                return String(format: "ssh wall-clock timeout after %.1fs — %@", elapsed, trimmed)
+            case .nonZeroExit(let code, let stderr):
+                let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    return "ssh exited with status \(code)"
+                }
+                return "ssh exited with status \(code) — \(trimmed)"
+            }
+        }
+        return "\(error)"
+    }
+
     private func appendLog(_ message: String) {
         let entry = LogEntry(date: Date(), message: message)
         DispatchQueue.main.async {
@@ -96,11 +118,12 @@ final class StatusFetcher: ObservableObject {
                     completion?(newSnapshot)
                 }
             } catch {
-                self.appendLog("Error: \(error)")
+                let message = Self.describe(error)
+                self.appendLog("Error: \(message)")
                 DispatchQueue.main.async {
                     self.isFetching = false
-                    self.lastError = "\(error)"
-                    SnapshotCache.saveError("\(error)")
+                    self.lastError = message
+                    SnapshotCache.saveError(message)
                     self.reloadWidgetTimelines()
                     completion?(nil)
                 }

@@ -23,7 +23,5 @@
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.widgetkit-extension</string>
 	</dict>
-	<key>SlurmHUDAppGroupIdentifier</key>
-	<string>$(SLURMHUD_APP_GROUP_IDENTIFIER)</string>
 </dict>
 </plist>

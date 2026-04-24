@@ -18,7 +18,5 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>SlurmHUDAppGroupIdentifier</key>
-	<string>$(SLURMHUD_APP_GROUP_IDENTIFIER)</string>
 </dict>
 </plist>

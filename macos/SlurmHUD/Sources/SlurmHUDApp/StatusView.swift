@@ -341,6 +341,13 @@ struct NodeCellView: View {
                         value: "\(Int(mem))GB"
                     )
                 }
+                if let disk = node.tmp_disk_gb, disk > 0 {
+                    ResourceTag(
+                        icon: "internaldrive",
+                        label: "DISK",
+                        value: formatDiskSize(disk)
+                    )
+                }
             }
             .font(.caption)
             .foregroundColor(.secondary)
@@ -399,6 +406,14 @@ struct NodeCellView: View {
         )
         .cornerRadius(8)
     }
+}
+
+private func formatDiskSize(_ gb: Double) -> String {
+    if gb >= 1024 {
+        let tb = gb / 1024
+        return String(format: tb >= 10 ? "%.0fTB" : "%.1fTB", tb)
+    }
+    return "\(Int(gb))GB"
 }
 
 private struct ResourceTag: View {

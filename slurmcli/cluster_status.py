@@ -548,6 +548,7 @@ def build_cluster_snapshot(
                     "node": node,
                     "state": info.get("state") or "unknown",
                     "memory_gb": info.get("memory_gb"),
+                    "tmp_disk_gb": info.get("tmp_disk_gb"),
                     "cpus_alloc": info.get("cpus_alloc"),
                     "cpus_total": info.get("cpus_total"),
                     "cpu_arch": info.get("cpu_arch"),

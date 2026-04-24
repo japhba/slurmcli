@@ -63,6 +63,7 @@ struct NodeDetail: Codable, Identifiable {
     let node: String?
     let state: String?
     let memory_gb: Double?
+    let tmp_disk_gb: Double?
     let cpus_alloc: Int?
     let cpus_total: Int?
     let gpus_in_use: Int?
@@ -75,7 +76,7 @@ struct NodeDetail: Codable, Identifiable {
     private let _uuid = UUID()
 
     private enum CodingKeys: String, CodingKey {
-        case node, state, memory_gb, cpus_alloc, cpus_total
+        case node, state, memory_gb, tmp_disk_gb, cpus_alloc, cpus_total
         case gpus_in_use, gpus_total, gpu_label_text, users, jobs
     }
 

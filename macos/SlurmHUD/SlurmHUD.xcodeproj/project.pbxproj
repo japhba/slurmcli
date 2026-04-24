@@ -310,7 +310,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD.SlurmHUDWidget;
 				SDKROOT = macosx;
-				SLURMHUD_APP_GROUP_IDENTIFIER = com.jbauer.slurmhud.shared;
 			};
 			name = Release;
 		};
@@ -330,7 +329,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD;
 				SDKROOT = macosx;
-				SLURMHUD_APP_GROUP_IDENTIFIER = com.jbauer.slurmhud.shared;
 			};
 			name = Debug;
 		};
@@ -350,7 +348,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD;
 				SDKROOT = macosx;
-				SLURMHUD_APP_GROUP_IDENTIFIER = com.jbauer.slurmhud.shared;
 			};
 			name = Release;
 		};
@@ -433,7 +430,6 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.jbauer.SlurmHUD.SlurmHUDWidget;
 				SDKROOT = macosx;
-				SLURMHUD_APP_GROUP_IDENTIFIER = com.jbauer.slurmhud.shared;
 			};
 			name = Debug;
 		};

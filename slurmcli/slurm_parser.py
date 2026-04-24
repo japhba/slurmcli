@@ -102,6 +102,7 @@ def build_node_info(fields: Dict[str, str], node_name: str) -> Dict[str, Any]:
     info: Dict[str, Any] = {
         'node': node_name,
         'memory_gb': None,
+        'tmp_disk_gb': None,
         'cpus_total': None,
         'cpus_alloc': None,
         'cpu_arch': None,
@@ -117,6 +118,15 @@ def build_node_info(fields: Dict[str, str], node_name: str) -> Dict[str, Any]:
 
     if 'RealMemory' in fields:
         info['memory_gb'] = int(fields['RealMemory']) / 1024
+
+    # scontrol reports TmpDisk in MB (the configured local scratch size).
+    if 'TmpDisk' in fields:
+        try:
+            tmp_mb = int(fields['TmpDisk'])
+            if tmp_mb > 0:
+                info['tmp_disk_gb'] = tmp_mb / 1024
+        except (TypeError, ValueError):
+            pass
 
     if 'CPUTot' in fields:
         info['cpus_total'] = int(fields['CPUTot'])

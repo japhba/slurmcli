@@ -185,6 +185,9 @@ private struct ClusterWidgetBoard {
         let gpuLabel: String
         let stateLabel: String
         let tone: Tone
+        /// 0.0 = idle, 1.0 = fully allocated. `nil` when the node is in
+        /// drain/down (rendered as warning red regardless of load).
+        let loadFraction: Double?
         let jobs: [JobTile]
     }
 
@@ -278,6 +281,7 @@ private struct ClusterWidgetBoard {
 
         let gpuLabel = (node.gpu_label_text?.isEmpty == false ? node.gpu_label_text : nil) ?? "CPU"
         let state = simplifiedState(node.state)
+        let load = computeLoadFraction(node: node, tone: state.tone)
 
         return NodeTile(
             id: node.id,
@@ -285,8 +289,36 @@ private struct ClusterWidgetBoard {
             gpuLabel: gpuLabel,
             stateLabel: state.label,
             tone: state.tone,
+            loadFraction: load,
             jobs: resources
         )
+    }
+
+    /// Mirrors NodeCellView.loadFraction in the main app so the widget
+    /// shows the same green→yellow→orange ramp. Returns nil for
+    /// problematic nodes (drain/down) so the renderer paints them red.
+    private static func computeLoadFraction(node: NodeDetail, tone: NodeTile.Tone) -> Double? {
+        if tone == .warning { return nil }
+
+        var fractions: [Double] = []
+        if let total = node.cpus_total, total > 0 {
+            fractions.append(Double(node.cpus_alloc ?? 0) / Double(total))
+        }
+        if let total = node.gpus_total, total > 0 {
+            fractions.append(Double(node.gpus_in_use ?? 0) / Double(total))
+        }
+        if let observed = fractions.max() {
+            return min(1.0, max(0.0, observed))
+        }
+
+        // Fall back to the categorical state when load isn't quantifiable.
+        switch tone {
+        case .available: return 0.0
+        case .mixed:     return 0.5
+        case .busy:      return 1.0
+        case .warning:   return nil
+        case .neutral:   return 0.5
+        }
     }
 
     private static func placeholderNode(named name: String) -> NodeTile {
@@ -296,6 +328,7 @@ private struct ClusterWidgetBoard {
             gpuLabel: "Awaiting details",
             stateLabel: "unknown",
             tone: .neutral,
+            loadFraction: nil,
             jobs: []
         )
     }
@@ -665,10 +698,10 @@ struct SlurmHUDWidgetView: View {
 
         return ZStack(alignment: .bottomTrailing) {
             RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .fill(nodeFillColor(node.tone))
+                .fill(nodeFillColor(node))
                 .overlay {
                     RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .strokeBorder(nodeStrokeColor(node.tone), lineWidth: 0.8)
+                        .strokeBorder(nodeStrokeColor(node), lineWidth: 0.8)
                 }
                 .frame(height: family == .systemSmall ? 12 : 14)
 
@@ -807,7 +840,7 @@ struct SlurmHUDWidgetView: View {
                     .padding(.vertical, nodeBadgeVerticalPadding)
                     .background {
                         Capsule(style: .continuous)
-                            .fill(nodeStateBadgeFill(node.tone))
+                            .fill(nodeStateBadgeFill(node))
                     }
             }
 
@@ -835,11 +868,11 @@ struct SlurmHUDWidgetView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
             RoundedRectangle(cornerRadius: nodeCornerRadius, style: .continuous)
-                .fill(nodeFillColor(node.tone))
+                .fill(nodeFillColor(node))
         }
         .overlay {
             RoundedRectangle(cornerRadius: nodeCornerRadius, style: .continuous)
-                .strokeBorder(nodeStrokeColor(node.tone), lineWidth: 0.8)
+                .strokeBorder(nodeStrokeColor(node), lineWidth: 0.8)
         }
     }
 
@@ -878,11 +911,11 @@ struct SlurmHUDWidgetView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
             RoundedRectangle(cornerRadius: nodeCornerRadius, style: .continuous)
-                .fill(nodeFillColor(node.tone))
+                .fill(nodeFillColor(node))
         }
         .overlay {
             RoundedRectangle(cornerRadius: nodeCornerRadius, style: .continuous)
-                .strokeBorder(nodeStrokeColor(node.tone), lineWidth: 0.9)
+                .strokeBorder(nodeStrokeColor(node), lineWidth: 0.9)
         }
     }
 
@@ -1163,57 +1196,73 @@ struct SlurmHUDWidgetView: View {
         return Color.primary.opacity(0.08)
     }
 
-    private func nodeFillColor(_ tone: ClusterWidgetBoard.NodeTile.Tone) -> Color {
-        let strongBackdrop = usesCustomBackdrop && colorScheme == .dark
+    /// Hue ramp shared with the app's NodeCellView: 120° (green) →
+    /// 60° (yellow) → 30° (orange). Drain/down nodes (loadFraction == nil)
+    /// are rendered red regardless of load.
+    private func loadHue(
+        _ load: Double?,
+        saturation: Double,
+        brightness: Double,
+        opacity: Double
+    ) -> Color {
+        guard let load else {
+            return Color.red.opacity(opacity)
+        }
+        let t = min(1.0, max(0.0, load))
+        let hueDegrees: Double
+        if t <= 0.5 {
+            hueDegrees = 120 - 60 * (t / 0.5)
+        } else {
+            hueDegrees = 60 - 30 * ((t - 0.5) / 0.5)
+        }
+        return Color(hue: hueDegrees / 360.0, saturation: saturation, brightness: brightness)
+            .opacity(opacity)
+    }
 
-        switch tone {
-        case .available:
-            return Color.green.opacity(strongBackdrop ? 0.18 : 0.12)
-        case .mixed:
-            return Color.cyan.opacity(strongBackdrop ? 0.16 : 0.12)
-        case .busy:
-            return Color.orange.opacity(strongBackdrop ? 0.18 : 0.12)
-        case .warning:
-            return Color.red.opacity(strongBackdrop ? 0.18 : 0.12)
-        case .neutral:
+    private func nodeFillColor(_ tile: ClusterWidgetBoard.NodeTile) -> Color {
+        let strongBackdrop = usesCustomBackdrop && colorScheme == .dark
+        if tile.tone == .neutral, tile.loadFraction == nil {
+            // No quantitative load AND no problematic state — render as
+            // the old neutral chrome so unknowns don't get a misleading hue.
             if usesCustomBackdrop {
                 return colorScheme == .dark ? Color.white.opacity(0.11) : Color.white.opacity(0.36)
             }
             return Color.primary.opacity(0.04)
         }
+        return loadHue(
+            tile.loadFraction,
+            saturation: 0.55,
+            brightness: 0.95,
+            opacity: strongBackdrop ? 0.22 : 0.16
+        )
     }
 
-    private func nodeStrokeColor(_ tone: ClusterWidgetBoard.NodeTile.Tone) -> Color {
-        switch tone {
-        case .available:
-            return Color.green.opacity(usesCustomBackdrop && colorScheme == .dark ? 0.50 : 0.26)
-        case .mixed:
-            return Color.cyan.opacity(usesCustomBackdrop && colorScheme == .dark ? 0.48 : 0.26)
-        case .busy:
-            return Color.orange.opacity(usesCustomBackdrop && colorScheme == .dark ? 0.50 : 0.26)
-        case .warning:
-            return Color.red.opacity(usesCustomBackdrop && colorScheme == .dark ? 0.50 : 0.26)
-        case .neutral:
+    private func nodeStrokeColor(_ tile: ClusterWidgetBoard.NodeTile) -> Color {
+        let strongBackdrop = usesCustomBackdrop && colorScheme == .dark
+        if tile.tone == .neutral, tile.loadFraction == nil {
             if usesCustomBackdrop {
                 return colorScheme == .dark ? Color.white.opacity(0.12) : Color.white.opacity(0.28)
             }
             return Color.primary.opacity(0.10)
         }
+        return loadHue(
+            tile.loadFraction,
+            saturation: 0.70,
+            brightness: 0.85,
+            opacity: strongBackdrop ? 0.55 : 0.35
+        )
     }
 
-    private func nodeStateBadgeFill(_ tone: ClusterWidgetBoard.NodeTile.Tone) -> Color {
-        switch tone {
-        case .available:
-            return Color.green.opacity(0.24)
-        case .mixed:
-            return Color.cyan.opacity(0.22)
-        case .busy:
-            return Color.orange.opacity(0.24)
-        case .warning:
-            return Color.red.opacity(0.24)
-        case .neutral:
+    private func nodeStateBadgeFill(_ tile: ClusterWidgetBoard.NodeTile) -> Color {
+        if tile.tone == .neutral, tile.loadFraction == nil {
             return usesCustomBackdrop ? Color.white.opacity(0.14) : Color.primary.opacity(0.08)
         }
+        return loadHue(
+            tile.loadFraction,
+            saturation: 0.65,
+            brightness: 0.88,
+            opacity: 0.30
+        )
     }
 }
 

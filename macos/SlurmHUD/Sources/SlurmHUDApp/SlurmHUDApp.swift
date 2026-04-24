@@ -47,6 +47,11 @@ struct SlurmHUDApp: App {
 @main
 enum AppEntry {
     static func main() {
+        // Mirror the persistent config into /private/tmp/slurmhud/ so the
+        // sandboxed widget can read the latest settings even after a
+        // reboot wiped /tmp. Cheap and idempotent.
+        SharedContainer.refreshSharedConfigMirror()
+
         if CommandLine.arguments.contains(RefreshCacheCommand.flag) {
             let status = RefreshCacheCommand.run()
             exit(status)

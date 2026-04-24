@@ -34,12 +34,14 @@ jobs:
 
       - name: Build SlurmHUD.app
         working-directory: macos/SlurmHUD
-        run: make rebuild
+        # INSTALL_DIR pins the build output to a known absolute path so the
+        # packaging step doesn't depend on $HOME.
+        run: make rebuild INSTALL_DIR=/tmp/slurmhud-out
 
       - name: Verify build artifact
         id: verify
         run: |
-          APP_PATH=/tmp/slurmhud-derived/Build/Products/Debug/SlurmHUD.app
+          APP_PATH=/tmp/slurmhud-out/SlurmHUD.app
           if [ ! -d "$APP_PATH" ]; then
             echo "::error::Expected SlurmHUD.app at $APP_PATH but it is missing"
             exit 1

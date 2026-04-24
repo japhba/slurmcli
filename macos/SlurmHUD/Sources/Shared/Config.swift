@@ -114,90 +114,108 @@ struct SlurmHUDConfig: Codable {
     }
 }
 
-private let appGroupInfoKey = "SlurmHUDAppGroupIdentifier"
-private let defaultAppGroupIdentifier = "com.jbauer.slurmhud.shared"
-private let configFileName = ".slurmhud.json"
-private let cacheFileName = ".slurmhud-cache.json"
+private let configFileName = "config.json"
+private let cacheFileName = "cache.json"
+private let legacyConfigFileName = ".slurmhud.json"
 
-/// Single source of truth for the App Group container path.
+/// File-based shared storage for app↔widget communication.
 ///
-/// We resolve exactly one identifier (from `Bundle.main`'s Info.plist,
-/// falling back to a hardcoded default only if that's missing) and use
-/// `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)` to
-/// get the canonical container URL for the running process. No fallback
-/// to a manually-constructed `~/Library/Group Containers/X` path, no
-/// iteration over multiple bundles' identifiers, no legacy `~/.slurmhud*`
-/// paths, no multi-path writes.
+/// We don't use App Groups: those require a paid Apple Developer Program
+/// membership to register a `group.*` identifier on developer.apple.com,
+/// and without that registration the auto-generated provisioning profile
+/// silently strips the `application-groups` entitlement → containermanagerd
+/// never creates the symlink in the widget's sandbox → widget can't read.
 ///
-/// All those fallbacks were what caused the recurring "SlurmHUD would
-/// like to access data from other apps" TCC prompts: every time a
-/// non-entitled path was touched (because the running process's
-/// entitlement only covers its own group ID), macOS asked for permission.
-/// One identifier, one entitlement, one container — no prompts.
-private enum SharedContainer {
+/// Instead:
+///   * The non-sandboxed main app + refresh helper own the truth in
+///     `~/Library/Application Support/SlurmHUD/config.json` (persists
+///     across reboots) and write the cache to `/private/tmp/slurmhud/`.
+///   * The sandboxed widget has a `temporary-exception.files.absolute-path
+///     .read-only` entitlement for `/private/tmp/slurmhud/` and reads the
+///     latest cache + a mirrored copy of the config from there.
+///   * On every main-app launch and config save, we re-mirror the
+///     persistent config to `/private/tmp/slurmhud/config.json` so the
+///     widget sees the current settings even after a reboot wipes /tmp.
+enum SharedContainer {
     private static let fileManager = FileManager.default
 
-    /// One-time migration from any historical container layouts to the
-    /// resolved one. Done lazily on first access so the (potentially TCC-
-    /// prompting) read of legacy paths only happens once per install.
-    private static let migrate: Void = {
-        runMigration()
-    }()
+    /// Widget-readable transit directory. /tmp on macOS resolves to
+    /// /private/tmp; we use the resolved path because the sandbox
+    /// temporary-exception entitlement matches against resolved paths.
+    static let sharedDir = URL(fileURLWithPath: "/private/tmp/slurmhud", isDirectory: true)
 
-    static var groupIdentifier: String {
-        if let raw = Bundle.main.object(forInfoDictionaryKey: appGroupInfoKey) as? String {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty, !trimmed.contains("$(") {
-                return trimmed
-            }
-        }
-        return defaultAppGroupIdentifier
+    static func sharedCacheURL() -> URL {
+        sharedDir.appendingPathComponent(cacheFileName, isDirectory: false)
     }
 
-    /// Container URL without triggering migration. Used by both the
-    /// public accessors and `runMigration` itself, so migration can
-    /// resolve the destination path without re-entering the lazy
-    /// initializer that drives it.
-    private static var rawContainerURL: URL {
-        if let url = fileManager.containerURL(forSecurityApplicationGroupIdentifier: groupIdentifier) {
-            return url
-        }
-        // Last-resort path. If we ever land here it means the current
-        // process has no App Group entitlement — accessing this path will
-        // most likely fail. We deliberately don't try alternate IDs;
-        // failing visibly is better than dragging in a TCC prompt.
-        return fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Group Containers", isDirectory: true)
-            .appendingPathComponent(groupIdentifier, isDirectory: true)
+    static func sharedConfigURL() -> URL {
+        sharedDir.appendingPathComponent(configFileName, isDirectory: false)
     }
 
-    static var containerURL: URL {
-        _ = migrate
-        return rawContainerURL
-    }
-
-    static func configURL() -> URL {
-        containerURL.appendingPathComponent(configFileName, isDirectory: false)
-    }
-
-    static func cacheURL() -> URL {
-        containerURL.appendingPathComponent(cacheFileName, isDirectory: false)
-    }
-
-    static func loadConfigData() -> Data? {
-        try? Data(contentsOf: configURL())
-    }
-
-    static func saveConfigData(_ data: Data) {
-        writeAtomically(data, to: configURL())
+    /// Persistent config location used by the (non-sandboxed) main app.
+    /// The widget cannot reach Application Support from inside its sandbox.
+    static func persistentConfigURL() -> URL {
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return base
+            .appendingPathComponent("SlurmHUD", isDirectory: true)
+            .appendingPathComponent(configFileName, isDirectory: false)
     }
 
     static func loadCacheData() -> Data? {
-        try? Data(contentsOf: cacheURL())
+        try? Data(contentsOf: sharedCacheURL())
     }
 
     static func saveCacheData(_ data: Data) {
-        writeAtomically(data, to: cacheURL())
+        ensureSharedDir()
+        writeAtomically(data, to: sharedCacheURL())
+    }
+
+    /// Read order: persistent (only succeeds for the non-sandboxed main
+    /// app) → shared mirror (what the widget reads). Both fall back to
+    /// the legacy App-Group config on first run after this rewrite.
+    static func loadConfigData() -> Data? {
+        if let data = try? Data(contentsOf: persistentConfigURL()) {
+            return data
+        }
+        if let data = try? Data(contentsOf: sharedConfigURL()) {
+            return data
+        }
+        return loadLegacyConfigData()
+    }
+
+    static func saveConfigData(_ data: Data) {
+        try? fileManager.createDirectory(
+            at: persistentConfigURL().deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        writeAtomically(data, to: persistentConfigURL())
+        ensureSharedDir()
+        writeAtomically(data, to: sharedConfigURL())
+    }
+
+    /// Re-mirror the persistent config into the shared dir. /tmp gets
+    /// wiped on reboot, so the main app calls this on launch to keep the
+    /// widget in sync without requiring the user to re-save.
+    static func refreshSharedConfigMirror() {
+        guard let data = try? Data(contentsOf: persistentConfigURL()) else {
+            // No persistent config yet; try migrating from legacy App
+            // Group containers so the widget has something to read.
+            if let legacy = loadLegacyConfigData() {
+                saveConfigData(legacy)
+            }
+            return
+        }
+        ensureSharedDir()
+        writeAtomically(data, to: sharedConfigURL())
+    }
+
+    private static func ensureSharedDir() {
+        try? fileManager.createDirectory(
+            at: sharedDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o755]
+        )
     }
 
     private static func writeAtomically(_ data: Data, to url: URL) {
@@ -212,46 +230,24 @@ private enum SharedContainer {
         }
     }
 
-    /// One-time copy of config from any pre-existing container layout.
-    /// We deliberately only migrate the config (small, painful to lose),
-    /// not the cache (ephemeral, gets rewritten on the next refresh).
-    private static func runMigration() {
-        let target = rawContainerURL.appendingPathComponent(configFileName, isDirectory: false)
-        guard !fileManager.fileExists(atPath: target.path) else { return }
-
+    /// Best-effort load of the old App Group `.slurmhud.json` config from
+    /// any pre-existing Group Container, so users who upgrade don't lose
+    /// their host/command settings.
+    private static func loadLegacyConfigData() -> Data? {
         let home = fileManager.homeDirectoryForCurrentUser
         let groupContainers = home.appendingPathComponent("Library/Group Containers", isDirectory: true)
-        var sources: [URL] = []
-
-        // Historical sibling Group Containers (e.g. team-prefixed
-        // 8XAD7C8Z68.com.jbauer.slurmhud.shared) that an earlier version
-        // of the app created on this machine.
-        if let entries = try? fileManager.contentsOfDirectory(
+        guard let entries = try? fileManager.contentsOfDirectory(
             at: groupContainers,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
-        ) {
-            for entry in entries {
-                if entry.lastPathComponent.hasSuffix(".com.jbauer.slurmhud.shared")
-                    || entry.lastPathComponent == "com.jbauer.slurmhud.shared" {
-                    let candidate = entry.appendingPathComponent(configFileName, isDirectory: false)
-                    if candidate.standardizedFileURL.path != target.standardizedFileURL.path {
-                        sources.append(candidate)
-                    }
-                }
+        ) else { return nil }
+        for entry in entries where entry.lastPathComponent.contains("slurmhud") {
+            let candidate = entry.appendingPathComponent(legacyConfigFileName, isDirectory: false)
+            if let data = try? Data(contentsOf: candidate) {
+                return data
             }
         }
-
-        // Pre-App-Group fallback that very old builds wrote to.
-        sources.append(home.appendingPathComponent(configFileName))
-
-        for source in sources {
-            guard fileManager.fileExists(atPath: source.path),
-                  let data = try? Data(contentsOf: source) else { continue }
-            writeAtomically(data, to: target)
-            NSLog("SharedContainer: migrated config from \(source.path) -> \(target.path)")
-            return
-        }
+        return nil
     }
 }
 
@@ -289,7 +285,7 @@ struct CachedSnapshot: Codable {
 
 final class SnapshotCache {
     static var cacheURL: URL {
-        SharedContainer.cacheURL()
+        SharedContainer.sharedCacheURL()
     }
 
     static func save(snapshot: ClusterSnapshot, error: String? = nil) {
@@ -332,28 +328,22 @@ final class SnapshotCache {
     }
 
     static func sharedAccessErrorMessage() -> String? {
-        if let message = readAccessIssueMessage(for: cacheURL) {
-            return message
-        }
-        return readAccessIssueMessage(for: SharedContainer.configURL())
-    }
-
-    private static func readAccessIssueMessage(for url: URL) -> String? {
+        // The cache file simply may not exist yet (no refresh has happened).
+        // Permission errors here would mean the widget's sandbox exception
+        // for /private/tmp/slurmhud/ is missing or stale.
         do {
-            _ = try Data(contentsOf: url)
+            _ = try Data(contentsOf: cacheURL)
             return nil
         } catch {
             let nsError = error as NSError
             let isPermissionError =
                 nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileReadNoPermissionError
-
             guard isPermissionError else { return nil }
-
-            return "Widget cannot access shared data. In Xcode, sign SlurmHUD and SlurmHUDWidget with the same Development Team and App Group."
+            return "Widget can't read \(cacheURL.path). The sandbox exception entitlement may be missing — rebuild via `make rebuild`."
         }
     }
 
     static func clear() {
-        try? FileManager.default.removeItem(at: SharedContainer.cacheURL())
+        try? FileManager.default.removeItem(at: SharedContainer.sharedCacheURL())
     }
 }
